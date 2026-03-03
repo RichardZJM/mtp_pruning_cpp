@@ -1,0 +1,18 @@
+# Compilation Artifacts
+obj/
+bin/
+make/config.mk
+
+# External Dependencies (downloaded via curl)
+external/json.hpp
+
+
+# Output Results
+*.csv
+
+# HPC Job Logs
+slurm-*.out
+
+# System/Editor Junk
+.DS_Store
+.vscode/
