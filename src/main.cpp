@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstdlib>
+#include <iomanip> // For std::setprecision
 
 #ifdef USE_MPI
 #include <mpi.h>
@@ -43,7 +44,10 @@ void evaluate_population(int offset,
                          std::vector<char> &genes,
                          std::vector<double> &cost_sse,
                          std::vector<char> &local_genes,
-                         std::vector<double> &local_results)
+                         std::vector<double> &local_results,
+                         double &eval_time,
+                         double &mpi_time,
+                         double &gather_time)
 {
     if (count == 0)
         return;
@@ -52,25 +56,35 @@ void evaluate_population(int offset,
     int genes_per_ind = n_var;
 
 #ifdef USE_MPI
+    double t0 = 0;
+    if (mpi_rank == 0)
+        t0 = MPI_Wtime();
+
     // Master directly provides pointers starting at `offset * genes_per_ind`
     MPI_Scatter(mpi_rank == 0 ? genes.data() + offset * genes_per_ind : nullptr,
                 local_count * genes_per_ind, MPI_CHAR,
                 local_genes.data(), local_count * genes_per_ind, MPI_CHAR,
                 0, MPI_COMM_WORLD);
+
+    if (mpi_rank == 0)
+        mpi_time += (MPI_Wtime() - t0);
 #else
     // Non-MPI fallback reads directly from the NSGA object and calculates on the main pointer.
     if (mpi_rank == 0)
     {
+        auto start_eval = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < count; ++i)
         {
             cost_sse[(offset + i) * 2] = cost_calc.calculate(genes.data() + (offset + i) * genes_per_ind, n_var);
             cost_sse[(offset + i) * 2 + 1] = sse_calc.calculate(genes.data() + (offset + i) * genes_per_ind);
         }
+        eval_time += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start_eval).count();
         return;
     }
 #endif
 
 #ifdef USE_MPI
+    double start_eval = MPI_Wtime();
     for (int i = 0; i < local_count; ++i)
     {
         double c = cost_calc.calculate(local_genes.data() + i * genes_per_ind, n_var);
@@ -79,12 +93,20 @@ void evaluate_population(int offset,
         local_results[i * 2] = c;
         local_results[i * 2 + 1] = s;
     }
+    eval_time += MPI_Wtime() - start_eval;
 
-    // Interlaved pairs format gathers directly onto contiguous master array memory
+    double t2 = 0;
+    if (mpi_rank == 0)
+        t2 = MPI_Wtime();
+
+    // Interleaved pairs format gathers directly onto contiguous master array memory
     MPI_Gather(local_results.data(), local_count * 2, MPI_DOUBLE,
                mpi_rank == 0 ? cost_sse.data() + offset * 2 : nullptr,
                local_count * 2, MPI_DOUBLE,
                0, MPI_COMM_WORLD);
+
+    if (mpi_rank == 0)
+        gather_time += (MPI_Wtime() - t2);
 #endif
 }
 
@@ -275,6 +297,21 @@ int main(int argc, char **argv)
         }
     }
 
+    // Set tracking variables
+    double eval_time = 0.0;
+    double mpi_time = 0.0;
+    double gather_time = 0.0;
+
+    // Shift start_time calculation here to cover the total process scope properly
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    auto elapsed_s = [&]()
+    {
+        return std::chrono::duration<double>(
+                   std::chrono::high_resolution_clock::now() - start_time)
+            .count();
+    };
+
     // --- 4. Initialization & Gen 0 Evaluation ---
     if (rank == 0)
     {
@@ -284,22 +321,14 @@ int main(int argc, char **argv)
 
     // Evaluate gen 0 evaluating directly at index 0 up to pop_size bounds
     evaluate_population(0, pop_size, n_var, rank, size, cost_calc, sse_calc,
-                        ga.genes, ga.cost_sse, local_genes, local_results);
+                        ga.genes, ga.cost_sse, local_genes, local_results,
+                        eval_time, mpi_time, gather_time);
 
     if (rank == 0)
     {
         // Survival run isolated to rank population count itself to initialize parameters natively
         ga.survival(pop_size);
     }
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    auto elapsed_s = [&]()
-    {
-        return std::chrono::duration<double>(
-                   std::chrono::high_resolution_clock::now() - start_time)
-            .count();
-    };
 
     // --- 5. Main Optimization Loop ---
     bool time_limit_reached = false;
@@ -314,7 +343,8 @@ int main(int argc, char **argv)
 
         // Evaluate offspring generated at index `pop_size` up to count `pop_size` lengths
         evaluate_population(pop_size, pop_size, n_var, rank, size, cost_calc, sse_calc,
-                            ga.genes, ga.cost_sse, local_genes, local_results);
+                            ga.genes, ga.cost_sse, local_genes, local_results,
+                            eval_time, mpi_time, gather_time);
 
         if (rank == 0)
         {
@@ -356,16 +386,61 @@ int main(int argc, char **argv)
             break;
     }
 
+    // Only gather the evaluation times at the end
+    std::vector<double> evals(size, 0.0);
+#ifdef USE_MPI
+    MPI_Gather(&eval_time, 1, MPI_DOUBLE, evals.data(), 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+#else
+    evals[0] = eval_time;
+#endif
+
     // --- 6. Save Final Results ---
     if (rank == 0)
     {
+        double exec_time = elapsed_s();
         std::filesystem::path out_path = output_dir / "pareto_final";
         ga.save_pareto(out_path.string());
 
-        std::cout << "Optimization finished in " << elapsed_s() << "s";
+        std::cout << "Optimization finished in " << exec_time << "s";
         if (time_limit_reached)
             std::cout << " (stopped by time limit)";
         std::cout << ".\n";
+
+#ifdef USE_MPI
+        double max_eval = evals[0];
+        double min_eval = evals[0];
+        double sum_eval = 0.0;
+        for (double e : evals)
+        {
+            if (e > max_eval)
+                max_eval = e;
+            if (e < min_eval)
+                min_eval = e;
+            sum_eval += e;
+        }
+        double mean_eval = sum_eval / size;
+
+        double communication_time = mpi_time + gather_time - (max_eval - evals[0]);
+        if (communication_time < 0.0)
+            communication_time = 0.0;
+
+        double serial_time = exec_time - max_eval - communication_time;
+        if (serial_time < 0.0)
+            serial_time = 0.0;
+
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "Evaluation times per process:[";
+        for (int i = 0; i < size; ++i)
+        {
+            std::cout << evals[i] << " s" << (i == size - 1 ? "" : ", ");
+        }
+        std::cout << "]\n";
+        std::cout << "Average fitness evaluation time: " << (mean_eval / exec_time * 100.0) << "%.\n";
+        std::cout << "Communication time (Estimated): " << (communication_time / exec_time * 100.0) << "%.\n";
+        std::cout << "Serial time (Estimated): " << (serial_time / exec_time * 100.0) << "%.\n";
+        std::cout << "Wasted time due to load imbalance (Estimated): " << ((max_eval - min_eval) / exec_time * 100.0) << "%.\n";
+#endif
+
         std::cout << "Results saved to " << out_path.string() << "_*.csv\n";
     }
 
