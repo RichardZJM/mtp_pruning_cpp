@@ -9,6 +9,7 @@
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
+#include <cstdlib>
 
 #ifdef USE_MPI
 #include <mpi.h>
@@ -87,6 +88,10 @@ void evaluate_population(int offset,
 
 int main(int argc, char **argv)
 {
+    setenv("OPENBLAS_NUM_THREADS", "1", 1);
+    setenv("MKL_NUM_THREADS", "1", 1);
+    setenv("OMP_NUM_THREADS", "1", 1);
+
     int rank = 0, size = 1;
 #ifdef USE_MPI
     MPI_Init(&argc, &argv);
