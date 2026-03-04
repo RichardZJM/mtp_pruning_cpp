@@ -14,23 +14,6 @@
 
 using json = nlohmann::json;
 
-static void work_range(int count, int mpi_rank, int mpi_size,
-                       int &start, int &end)
-{
-    int base = count / mpi_size;
-    int extra = count % mpi_size;
-    if (mpi_rank < extra)
-    {
-        start = mpi_rank * (base + 1);
-        end = start + base + 1;
-    }
-    else
-    {
-        start = extra * (base + 1) + (mpi_rank - extra) * base;
-        end = start + base;
-    }
-}
-
 void evaluate_population(std::vector<Individual> &group,
                          int n_var,
                          int mpi_rank,
@@ -51,14 +34,20 @@ void evaluate_population(std::vector<Individual> &group,
     if (count == 0)
         return;
 
+    // Because pop_size is padded in main(), local_count will always divide perfectly!
+    int local_count = count / mpi_size;
     int genes_per_ind = n_var;
 
-    // --- 1. Broadcast all genes to every rank ---
-    int total_genes = count * genes_per_ind;
-    std::vector<char> all_genes(total_genes, 0);
+    // Buffer for each rank's local share of genes
+    std::vector<char> local_genes(local_count * genes_per_ind);
 
+#ifdef USE_MPI
+    std::vector<char> all_genes;
+    // --- 1. Pack and Scatter genes ---
     if (mpi_rank == 0)
     {
+        // We must pack because group[i].genes (std::vector) is not memory contiguous across the population
+        all_genes.resize(count * genes_per_ind);
         for (int i = 0; i < count; ++i)
         {
             std::copy(group[i].genes.begin(),
@@ -67,23 +56,31 @@ void evaluate_population(std::vector<Individual> &group,
         }
     }
 
-#ifdef USE_MPI
-    MPI_Bcast(all_genes.data(), total_genes, MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Scatter(mpi_rank == 0 ? all_genes.data() : nullptr,
+                local_count * genes_per_ind, MPI_CHAR,
+                local_genes.data(), local_count * genes_per_ind, MPI_CHAR,
+                0, MPI_COMM_WORLD);
+#else
+    // Non-MPI fallback computes directly to save overhead
+    if (mpi_rank == 0)
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            group[i].cost = cost_calc.calculate(group[i], n_var);
+            group[i].sse = sse_calc.calculate(group[i]);
+        }
+        return;
+    }
 #endif
 
-    // --- 2. Each rank evaluates its own slice ---
-    int my_start, my_end;
-    work_range(count, mpi_rank, mpi_size, my_start, my_end);
-    int my_count = my_end - my_start;
+#ifdef USE_MPI
+    // --- 2. Each rank evaluates its perfectly sized slice ---
+    std::vector<double> local_results(local_count * 2);
 
-    std::vector<double> local_results(my_count * 2);
-
-    for (int i = 0; i < my_count; ++i)
+    for (int i = 0; i < local_count; ++i)
     {
-        int global_idx = my_start + i;
-
         Individual ind;
-        auto src = all_genes.begin() + global_idx * genes_per_ind;
+        auto src = local_genes.begin() + i * genes_per_ind;
         ind.genes.assign(src, src + genes_per_ind);
 
         double c = cost_calc.calculate(ind, n_var);
@@ -93,36 +90,17 @@ void evaluate_population(std::vector<Individual> &group,
         local_results[i * 2 + 1] = s;
     }
 
-    // --- 3. Gatherv results back to root ---
-#ifdef USE_MPI
-    std::vector<int> recv_counts(mpi_size);
-    std::vector<int> displs(mpi_size);
-
-    for (int r = 0; r < mpi_size; ++r)
-    {
-        int rs, re;
-        work_range(count, r, mpi_size, rs, re);
-        recv_counts[r] = (re - rs) * 2;
-    }
-    displs[0] = 0;
-    for (int r = 1; r < mpi_size; ++r)
-    {
-        displs[r] = displs[r - 1] + recv_counts[r - 1];
-    }
-
+    // --- 3. Gather results back to root ---
     std::vector<double> all_results;
     if (mpi_rank == 0)
     {
         all_results.resize(count * 2);
     }
 
-    MPI_Gatherv(local_results.data(), my_count * 2, MPI_DOUBLE,
-                mpi_rank == 0 ? all_results.data() : nullptr,
-                recv_counts.data(), displs.data(), MPI_DOUBLE,
-                0, MPI_COMM_WORLD);
-#else
-    std::vector<double> &all_results = local_results;
-#endif
+    MPI_Gather(local_results.data(), local_count * 2, MPI_DOUBLE,
+               mpi_rank == 0 ? all_results.data() : nullptr,
+               local_count * 2, MPI_DOUBLE,
+               0, MPI_COMM_WORLD);
 
     // --- 4. Root writes results back into the Individual objects ---
     if (mpi_rank == 0)
@@ -133,6 +111,7 @@ void evaluate_population(std::vector<Individual> &group,
             group[i].sse = all_results[i * 2 + 1];
         }
     }
+#endif
 }
 
 int main(int argc, char **argv)
@@ -201,6 +180,20 @@ int main(int argc, char **argv)
 #endif
 
     int pop_size = config["pop_size"];
+
+#ifdef USE_MPI
+    // Pad pop_size so it aligns perfectly with MPI scatter/gather chunks.
+    if (pop_size % size != 0)
+    {
+        pop_size = ((pop_size + size - 1) / size) * size;
+        if (rank == 0)
+        {
+            std::cout << "Adjusted pop_size to " << pop_size
+                      << " to be a perfect multiple of MPI size (" << size << ")\n";
+        }
+    }
+#endif
+
     int n_gen = config["n_gen"];
     double time_limit = config.value("time", -1.0);
     int save_interval = config.value("save_interval", -1);
