@@ -9,6 +9,8 @@ external/json.hpp
 
 # Output Results
 *.csv
+optimization_results
+perf.data
 
 # HPC Job Logs
 slurm-*.out

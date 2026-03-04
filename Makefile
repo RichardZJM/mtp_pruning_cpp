@@ -1,90 +1,88 @@
 # ==========================================
-# MTP Pruning - Auto-Detecting Makefile
+# MTP Pruning - Makefile
 # ==========================================
+# Override any auto-detected value from the command line, e.g.:
+#   make BLAS=-lmkl_rt CXX=g++
 
-# 1. Auto-detect Base C++ Compiler (icpx > icpc > g++)
-ifeq ($(shell command -v icpx 2> /dev/null),)
-    ifeq ($(shell command -v icpc 2> /dev/null),)
-        BASE_CXX := g++
-    else
-        BASE_CXX := icpc
-    endif
-else
+# --- Compiler ---
+# Prefer Intel compilers (icpx > icpc > g++). MPI wrapper is used if available.
+# On HPC clusters, load the appropriate module first:
+#   module load intel  (for icpx/MKL)
+#   module load mpi    (for mpicxx)
+ifneq ($(shell command -v icpx 2>/dev/null),)
     BASE_CXX := icpx
-endif
-
-# 2. Auto-detect LAPACK/BLAS based on compiler
-ifneq (,$(filter icpx icpc,$(BASE_CXX)))
-    LDLIBS := -qmkl
+else ifneq ($(shell command -v icpc 2>/dev/null),)
+    BASE_CXX := icpc
 else
-    ifdef MKLROOT
-        LDLIBS := -L$(MKLROOT)/lib/intel64 -lmkl_rt
-    else
-        LDLIBS := -llapack -lblas
-    endif
+    BASE_CXX := g++
 endif
 
-# 3. Auto-detect MPI
 USE_MPI ?= 1
-ifeq ($(USE_MPI), 1)
-    ifneq ($(shell command -v mpicxx 2> /dev/null),)
-        CXX := mpicxx
+ifneq ($(shell command -v mpicxx 2>/dev/null),)
+    ifeq ($(USE_MPI),1)
+        CXX      := mpicxx
         CPPFLAGS += -DUSE_MPI
-        OBJ_DIR := obj/mpi
-        $(info -> MPI detected: Using mpicxx)
-    else
-        $(info -> Warning: mpicxx not found. Falling back to Serial mode.)
-        CXX := $(BASE_CXX)
-        OBJ_DIR := obj/serial
+        OBJ_DIR  := obj/mpi
     endif
+endif
+CXX     ?= $(BASE_CXX)
+OBJ_DIR ?= obj/serial
+
+# --- BLAS/LAPACK (sequential — no hidden threads fighting MPI ranks) ---
+# Detection order:
+#   1. Intel compiler    → -qmkl=sequential (built-in, no paths needed)
+#   2. $MKLROOT set      → explicit sequential MKL (HPC module system)
+#   3. Fedora/RHEL       → openblas-serial RPM (-lopenblas-serial)
+#   4. pkg-config        → Debian/Ubuntu libopenblas-dev
+#   5. libopenblas.so    → conda, manual installs, /usr/local
+#   6. Fallback          → netlib -lblas (slow, warns)
+ifneq ($(filter icpx icpc,$(BASE_CXX)),)
+    BLAS := -qmkl=sequential
+    $(info BLAS: Intel MKL sequential (compiler flag))
+else ifdef MKLROOT
+    BLAS := -L$(MKLROOT)/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl
+    $(info BLAS: Intel MKL sequential (MKLROOT))
+else ifneq ($(shell find /usr/lib64 /usr/lib -name "libopenblas-serial.so*" 2>/dev/null | head -1),)
+    BLAS := -lopenblas-serial -lm -ldl
+    $(info BLAS: OpenBLAS serial (Fedora/RHEL))
+else ifneq ($(shell pkg-config --exists openblas 2>/dev/null && echo 1),)
+    BLAS := $(shell pkg-config --libs openblas) -lm -ldl
+    $(info BLAS: OpenBLAS (pkg-config))
+else ifneq ($(shell find /usr/lib64 /usr/lib /usr/local/lib -name "libopenblas.so*" 2>/dev/null | head -1),)
+    BLAS := -lopenblas -lm -ldl
+    $(info BLAS: OpenBLAS (filesystem))
 else
-    CXX := $(BASE_CXX)
-    OBJ_DIR := obj/serial
-    $(info -> MPI explicitly disabled. Using Serial mode.)
+    BLAS := -llapack -lblas -lm -ldl
+    $(warning BLAS: Netlib reference BLAS (SLOW). Install openblas-serial (Fedora) or libopenblas-dev (Debian).)
 endif
 
-$(info -> Base Compiler: $(BASE_CXX))
-$(info -> LAPACK Linker: $(LDLIBS))
+LDLIBS := $(BLAS)
 
-# 4. Compilation Flags
+# --- Flags ---
+# No -fopenmp/-qopenmp: prevents OpenBLAS/MKL from spawning threads inside MPI ranks.
 CPPFLAGS += -Iexternal -Isrc
-CXXFLAGS += -O3 -std=c++17 -fPIC -march=native
-# CXXFLAGS += -O0 -g -std=c++17 -fPIC -march=native
+CXXFLAGS += -O3 -std=c++17 -march=native -pthread
 
-# 5. Files and Directories
+# --- Files ---
 SRC_DIR := src
-BIN_DIR := bin
-TARGET := $(BIN_DIR)/prune
+TARGET  := bin/prune
+SRC     := $(shell find $(SRC_DIR) -name "*.cpp")
+OBJ     := $(SRC:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/%.o)
 
-SRC := $(shell find $(SRC_DIR) -name "*.cpp")
-OBJ := $(SRC:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/%.o)
+# --- Rules ---
+$(TARGET): $(OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ $(LDLIBS) -o $@
+	@echo "Built: $@ | CXX=$(CXX) | $(BLAS)"
 
-# ==========================================
-# Build Rules
-# ==========================================
-
-.PHONY: all clean clean-all
-
-all: $(TARGET)
-
-# Compile objects (creates directories dynamically)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-# Link executable
-$(TARGET): $(OBJ)
-	@mkdir -p $(dir $@)
-	$(CXX) $^ $(LDFLAGS) $(LDLIBS) -o $@
-	@echo "=========================================="
-	@echo "Build successful: $(TARGET)"
-	@echo "=========================================="
-
-# Cleanup
+.PHONY: clean
 clean:
-	@echo "Cleaning compiled objects..."
-	@rm -rf obj
+	@rm -rf obj bin
 
-clean-all: clean
-	@echo "Cleaning binaries..."
-	@rm -rf bin
+# On HPC, ensure BLAS doesn't spawn threads behind MPI's back:
+#   export OPENBLAS_NUM_THREADS=1
+#   export MKL_NUM_THREADS=1

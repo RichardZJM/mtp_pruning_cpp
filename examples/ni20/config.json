@@ -1,0 +1,13 @@
+{
+  "mtp_file": "/home/richa/Documents/Projects/cpp_prune/examples/ni20/data/20.almtp",
+  "pop_size": 1000,
+  "n_gen": 40,
+  "time": 30,
+  "save_interval": 10,
+  "ytwy": 1308558.94848743616603,
+  "regularization": 1e-4,
+  "neigh_count": 20.528098,
+  "xtwx_file": "/home/richa/Documents/Projects/cpp_prune/examples/ni20/data/xtwx.bin",
+  "xtwy_file": "/home/richa/Documents/Projects/cpp_prune/examples/ni20/data/xtwy.bin",
+  "out_dir": "/home/richa/Documents/Projects/cpp_prune/examples/ni20/optimization_results"
+}

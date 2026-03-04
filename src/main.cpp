@@ -158,6 +158,8 @@ int main(int argc, char **argv)
 
     int pop_size = config["pop_size"];
     int n_gen = config["n_gen"];
+    double time_limit = config.value("time", -1.0);        // seconds; -1 = no limit
+    int save_interval = config.value("save_interval", -1); // gens; -1 = disabled
 
     if (rank == 0)
         std::cout << "Loading MTP and binary data...\n";
@@ -179,7 +181,28 @@ int main(int argc, char **argv)
     NSGA2 ga(pop_size, n_var, 42 + rank);
     std::vector<Individual> pop;
 
+    // Prepare output directory up front so intermediate saves can use it
+    std::filesystem::path output_dir = std::filesystem::path(config["out_dir"].get<std::string>());
+    if (rank == 0)
+    {
+        try
+        {
+            std::filesystem::create_directories(output_dir);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error creating directory: " << e.what() << "\n";
+        }
+    }
+
     auto start_time = std::chrono::high_resolution_clock::now();
+
+    auto elapsed_s = [&]()
+    {
+        return std::chrono::duration<double>(
+                   std::chrono::high_resolution_clock::now() - start_time)
+            .count();
+    };
 
     // --- 4. Initialization & Gen 0 Evaluation ---
     if (rank == 0)
@@ -188,7 +211,6 @@ int main(int argc, char **argv)
         std::cout << "Evaluating initial population..." << std::endl;
     }
 
-    // Evaluate the initial population (Parents for Gen 0)
     evaluate_population(pop, n_var, rank, size, cost_calc, sse_calc);
 
     // Perform initial ranking/sorting so parents have valid rank/crowding for selection
@@ -199,6 +221,8 @@ int main(int argc, char **argv)
     }
 
     // --- 5. Main Optimization Loop ---
+    bool time_limit_reached = false;
+
     for (int gen = 0; gen < n_gen; ++gen)
     {
         std::vector<Individual> offspring;
@@ -219,35 +243,51 @@ int main(int argc, char **argv)
             // Merges Parents (pop) + Offspring, sorts, and selects best N into 'pop'
             ga.survival(pop, offspring);
 
-            if ((gen + 1) % 10 == 0 || gen == 0)
+            int completed_gen = gen + 1;
+
+            if (completed_gen % 10 == 0 || gen == 0)
             {
-                std::cout << "Generation " << gen + 1 << "/" << n_gen << " complete." << std::endl;
+                std::cout << "Generation " << completed_gen << "/" << n_gen
+                          << " | Elapsed: " << elapsed_s() << "s" << std::endl;
+            }
+
+            // D. Intermediate save
+            if (save_interval > 0 && completed_gen % save_interval == 0)
+            {
+                std::string prefix = (output_dir / ("pareto_" + std::to_string(completed_gen))).string();
+                std::cout << "Saving intermediate results at generation " << completed_gen << "..." << std::endl;
+                ga.save_pareto(pop, prefix);
             }
         }
+
+        // E. Check time limit — broadcast decision so all MPI ranks exit together
+        int stop = 0;
+        if (rank == 0 && time_limit > 0.0 && elapsed_s() >= time_limit)
+        {
+            std::cout << "Time limit of " << time_limit << "s reached after generation "
+                      << gen + 1 << ". Stopping early.\n";
+            stop = 1;
+            time_limit_reached = true;
+        }
+
+#ifdef USE_MPI
+        MPI_Bcast(&stop, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+
+        if (stop)
+            break;
     }
 
-    // --- 6. Save Results ---
+    // --- 6. Save Final Results ---
     if (rank == 0)
     {
-        auto end_time = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> elapsed = end_time - start_time;
-
-        std::filesystem::path output_dir = std::filesystem::path(config["out_dir"]);
-        try
-        {
-            std::filesystem::create_directories(output_dir);
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Error creating directory: " << e.what() << "\n";
-        }
-
         std::filesystem::path out_path = output_dir / "pareto_final";
-
-        // Save Pareto Front (filters for rank == 0)
         ga.save_pareto(pop, out_path.string());
 
-        std::cout << "Optimization finished in " << elapsed.count() << " seconds.\n";
+        std::cout << "Optimization finished in " << elapsed_s() << "s";
+        if (time_limit_reached)
+            std::cout << " (stopped by time limit)";
+        std::cout << ".\n";
         std::cout << "Results saved to " << out_path.string() << "_*.csv\n";
     }
 

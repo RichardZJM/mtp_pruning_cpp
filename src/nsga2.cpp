@@ -1,26 +1,31 @@
 #include "nsga2.h"
 #include <algorithm>
 #include <iostream>
+#include <cassert>
 
 NSGA2::NSGA2(int pop_size_, int n_var_, int seed) : pop_size(pop_size_), n_var(n_var_), gen(seed) {}
 
 void NSGA2::initialize_population(std::vector<Individual> &pop)
 {
+    assert(pop_size >= 2 && "Population size must be at least 2.");
     pop.resize(pop_size);
-    std::uniform_int_distribution<uint8_t> dist(0, 255);
     int bytes = (n_var + 7) / 8;
 
     for (int i = 0; i < pop_size; ++i)
     {
-        pop[i].bits.resize(bytes);
-        if (i == 0)
-            std::fill(pop[i].bits.begin(), pop[i].bits.end(), 0);
-        else if (i == 1)
-            std::fill(pop[i].bits.begin(), pop[i].bits.end(), 0xFF);
-        else
+        pop[i].bits.assign(bytes, 0);
+        if (i == 1)
         {
-            for (int b = 0; b < bytes; ++b)
-                pop[i].bits[b] = dist(gen);
+            std::fill(pop[i].bits.begin(), pop[i].bits.end(), 0xFF);
+        }
+        else if (i > 1)
+        {
+            std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
+            for (int j = 0; j < n_var; ++j)
+            {
+                if (dist(gen))
+                    pop[i].bits[j / 8] |= (1 << (j % 8));
+            }
         }
     }
 }

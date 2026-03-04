@@ -1,7 +1,6 @@
 #include "evaluator.h"
 #include <iostream>
 #include <set>
-#include <queue>
 #include <cmath>
 #include <algorithm>
 
@@ -17,6 +16,11 @@ SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector
         xtwx[i * n_features + i] += reg;
     }
 
+    // Pre-allocate buffers to maximum possible size
+    active_buf.reserve(n_features);
+    A_buf.resize(n_features * n_features);
+    B_buf.resize(n_features);
+
     Individual all_ones;
     all_ones.bits.resize((n_var + 7) / 8, 0xFF);
     base_sse = 1.0;
@@ -30,43 +34,42 @@ SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector
 
 double SSECalculator::calculate(const Individual &ind) const
 {
-    // TODO STOP GET NEW MEMORY EACH TIME
-    std::vector<int> active;
-    active.reserve(n_features);
+    active_buf.clear();
 
     for (int i = 0; i < n_species; ++i)
-        active.push_back(i);
-    for (int i = 0; i < n_features - n_species; ++i)
+        active_buf.push_back(i);
+
+    int n_var = n_features - n_species;
+    for (int i = 0; i < n_var; ++i)
     {
         if (ind.get_bit(i))
-            active.push_back(i + n_species);
+            active_buf.push_back(i + n_species);
     }
 
-    int n = active.size();
+    int n = active_buf.size();
     if (n == 0)
         return INFINITY;
 
-    std::vector<double> A(n * n), B(n);
     for (int i = 0; i < n; ++i)
     {
-        B[i] = xtwy[active[i]];
+        B_buf[i] = xtwy[active_buf[i]];
         for (int j = 0; j < n; j++)
         {
-            A[i + j * n] = xtwx[active[i] * n_features + active[j]];
+            A_buf[i * n + j] = xtwx[active_buf[i] * n_features + active_buf[j]];
         }
     }
 
     char uplo = 'U';
     int nrhs = 1, info = 0;
-    dposv_(&uplo, &n, &nrhs, A.data(), &n, B.data(), &n, &info);
+    dposv_(&uplo, &n, &nrhs, A_buf.data(), &n, B_buf.data(), &n, &info);
 
     if (info > 0)
-        return INFINITY; // Singular or not pos-def
+        return INFINITY;
 
     double theta_dot_xtwy = 0;
     for (int i = 0; i < n; ++i)
     {
-        theta_dot_xtwy += B[i] * xtwy[active[i]];
+        theta_dot_xtwy += B_buf[i] * xtwy[active_buf[i]];
     }
 
     return (ytwy - theta_dot_xtwy) / base_sse;
@@ -79,7 +82,6 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
     : num_moments(num_moments_), basic_indices(basic_), scalar_indices(scalar_),
       neigh_count(neigh), radial_basis_size(radial)
 {
-
     std::set<int> mus_set, rank_set;
     for (size_t i = 0; i < basic_.size() / 4; ++i)
     {
@@ -106,6 +108,11 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
         parents_idx.push_back(parents_data.size());
     }
 
+    // Initialize buffers
+    mus_flags_buf.resize(n_mus);
+    rank_flags_buf.resize(n_ranks);
+    to_preserve_buf.resize(num_moments);
+
     Individual all_ones;
     all_ones.bits.resize((scalar_indices.size() + 7) / 8, 0xFF);
     base_cost = 1.0;
@@ -119,39 +126,44 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
 
 double CostCalculator::calculate(const Individual &ind, int n_var) const
 {
-    std::vector<bool> mus_flags(n_mus, false), rank_flags(n_ranks, false);
-    std::vector<bool> to_preserve(num_moments, false);
-    std::queue<int> q;
+    // Reset buffers
+    std::fill(mus_flags_buf.begin(), mus_flags_buf.end(), 0);
+    std::fill(rank_flags_buf.begin(), rank_flags_buf.end(), 0);
+    std::fill(to_preserve_buf.begin(), to_preserve_buf.end(), 0);
+
+    // Clear queue (efficiently)
+    while (!q_buf.empty())
+        q_buf.pop();
 
     for (int i = 0; i < n_var; ++i)
     {
         if (ind.get_bit(i))
         {
             int m = scalar_indices[i];
-            if (!to_preserve[m])
+            if (!to_preserve_buf[m])
             {
-                to_preserve[m] = true;
-                q.push(m);
+                to_preserve_buf[m] = 1;
+                q_buf.push(m);
             }
         }
     }
 
-    while (!q.empty())
+    while (!q_buf.empty())
     {
-        int child = q.front();
-        q.pop();
+        int child = q_buf.front();
+        q_buf.pop();
         for (int j = parents_idx[child]; j < parents_idx[child + 1]; j += 2)
         {
             int p1 = parents_data[j], p2 = parents_data[j + 1];
-            if (!to_preserve[p1])
+            if (!to_preserve_buf[p1])
             {
-                to_preserve[p1] = true;
-                q.push(p1);
+                to_preserve_buf[p1] = 1;
+                q_buf.push(p1);
             }
-            if (!to_preserve[p2])
+            if (!to_preserve_buf[p2])
             {
-                to_preserve[p2] = true;
-                q.push(p2);
+                to_preserve_buf[p2] = 1;
+                q_buf.push(p2);
             }
         }
     }
@@ -159,7 +171,7 @@ double CostCalculator::calculate(const Individual &ind, int n_var) const
     int ntimes = 0, nbasic = 0;
     for (int i = 0; i < num_moments; ++i)
     {
-        if (to_preserve[i])
+        if (to_preserve_buf[i])
         {
             int edges = (parents_idx[i + 1] - parents_idx[i]) / 2;
             ntimes += edges;
@@ -169,18 +181,18 @@ double CostCalculator::calculate(const Individual &ind, int n_var) const
                 int mu = basic_indices[i * 4];
                 int r = std::max({basic_indices[i * 4 + 1], basic_indices[i * 4 + 2], basic_indices[i * 4 + 3]});
                 if (mu < n_mus)
-                    mus_flags[mu] = true;
+                    mus_flags_buf[mu] = 1;
                 if (r < n_ranks)
-                    rank_flags[r] = true;
+                    rank_flags_buf[r] = 1;
             }
         }
     }
 
     int max_rank = 0, mus_count = 0;
-    for (bool b : rank_flags)
+    for (uint8_t b : rank_flags_buf)
         if (b)
             max_rank++;
-    for (bool b : mus_flags)
+    for (uint8_t b : mus_flags_buf)
         if (b)
             mus_count++;
 
