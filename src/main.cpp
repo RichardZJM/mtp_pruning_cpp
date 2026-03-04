@@ -15,6 +15,8 @@
 #include <mpi.h>
 #endif
 
+#include <dlfcn.h>
+
 using json = nlohmann::json;
 
 template <typename T>
@@ -91,6 +93,25 @@ int main(int argc, char **argv)
     setenv("OPENBLAS_NUM_THREADS", "1", 1);
     setenv("MKL_NUM_THREADS", "1", 1);
     setenv("OMP_NUM_THREADS", "1", 1);
+    setenv("VECLIB_MAXIMUM_THREADS", "1", 1);
+
+    // Force single-threaded BLAS at runtime — setenv alone may be too late
+    // if the library initialized its thread pool before main().
+    auto set_threads = [](const char *name, int val)
+    {
+        auto fn = (void (*)(int))dlsym(RTLD_DEFAULT, name);
+        if (fn)
+            fn(val);
+    };
+    auto set_threads_f = [](const char *name, int val)
+    {
+        auto fn = (void (*)(int *))dlsym(RTLD_DEFAULT, name);
+        if (fn)
+            fn(&val);
+    };
+    set_threads("openblas_set_num_threads", 1); // OpenBLAS
+    set_threads("MKL_Set_Num_Threads", 1);      // Intel MKL
+    set_threads_f("blas_set_num_threads_", 1);  // Netlib (Fortran)
 
     int rank = 0, size = 1;
 #ifdef USE_MPI
