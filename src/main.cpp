@@ -14,10 +14,23 @@
 
 using json = nlohmann::json;
 
-/**
- * Helper function to evaluate a specific group of individuals using MPI.
- * Used for both the initial population and subsequent offspring batches.
- */
+static void work_range(int count, int mpi_rank, int mpi_size,
+                       int &start, int &end)
+{
+    int base = count / mpi_size;
+    int extra = count % mpi_size;
+    if (mpi_rank < extra)
+    {
+        start = mpi_rank * (base + 1);
+        end = start + base + 1;
+    }
+    else
+    {
+        start = extra * (base + 1) + (mpi_rank - extra) * base;
+        end = start + base;
+    }
+}
+
 void evaluate_population(std::vector<Individual> &group,
                          int n_var,
                          int mpi_rank,
@@ -28,7 +41,7 @@ void evaluate_population(std::vector<Individual> &group,
     int count = 0;
     if (mpi_rank == 0)
     {
-        count = group.size();
+        count = static_cast<int>(group.size());
     }
 
 #ifdef USE_MPI
@@ -38,67 +51,80 @@ void evaluate_population(std::vector<Individual> &group,
     if (count == 0)
         return;
 
-    int bytes_per_ind = (n_var + 7) / 8;
-    // Calculate chunk size ensuring coverage of all individuals
-    int chunk_size = (count + mpi_size - 1) / mpi_size;
+    int genes_per_ind = n_var;
 
-    std::vector<uint8_t> send_buf;
-    std::vector<double> recv_results(chunk_size * 2);
-    std::vector<uint8_t> recv_bits(chunk_size * bytes_per_ind);
+    // --- 1. Broadcast all genes to every rank ---
+    int total_genes = count * genes_per_ind;
+    std::vector<char> all_genes(total_genes, 0);
 
-    // Root prepares the flattened bit buffer
     if (mpi_rank == 0)
     {
-        send_buf.resize(chunk_size * mpi_size * bytes_per_ind, 0); // Padding with 0s
         for (int i = 0; i < count; ++i)
         {
-            std::copy(group[i].bits.begin(), group[i].bits.end(), send_buf.begin() + i * bytes_per_ind);
+            std::copy(group[i].genes.begin(),
+                      group[i].genes.end(),
+                      all_genes.begin() + i * genes_per_ind);
         }
     }
 
 #ifdef USE_MPI
-    MPI_Scatter(send_buf.data(), chunk_size * bytes_per_ind, MPI_BYTE,
-                recv_bits.data(), chunk_size * bytes_per_ind, MPI_BYTE,
-                0, MPI_COMM_WORLD);
-#else
-    recv_bits = send_buf;
+    MPI_Bcast(all_genes.data(), total_genes, MPI_CHAR, 0, MPI_COMM_WORLD);
 #endif
 
-    // Workers evaluate their assigned chunk
-    for (int i = 0; i < chunk_size; ++i)
+    // --- 2. Each rank evaluates its own slice ---
+    int my_start, my_end;
+    work_range(count, mpi_rank, mpi_size, my_start, my_end);
+    int my_count = my_end - my_start;
+
+    std::vector<double> local_results(my_count * 2);
+
+    for (int i = 0; i < my_count; ++i)
     {
-        int global_idx = mpi_rank * chunk_size + i;
-        if (global_idx >= count)
-            break; // Skip padding
+        int global_idx = my_start + i;
 
         Individual ind;
-        auto start = recv_bits.begin() + i * bytes_per_ind;
-        ind.bits.assign(start, start + bytes_per_ind);
+        auto src = all_genes.begin() + global_idx * genes_per_ind;
+        ind.genes.assign(src, src + genes_per_ind);
 
-        // Perform Calculation
         double c = cost_calc.calculate(ind, n_var);
         double s = sse_calc.calculate(ind);
 
-        recv_results[i * 2] = c;
-        recv_results[i * 2 + 1] = s;
+        local_results[i * 2] = c;
+        local_results[i * 2 + 1] = s;
     }
 
-    // Gather results back to root
+    // --- 3. Gatherv results back to root ---
+#ifdef USE_MPI
+    std::vector<int> recv_counts(mpi_size);
+    std::vector<int> displs(mpi_size);
+
+    for (int r = 0; r < mpi_size; ++r)
+    {
+        int rs, re;
+        work_range(count, r, mpi_size, rs, re);
+        recv_counts[r] = (re - rs) * 2;
+    }
+    displs[0] = 0;
+    for (int r = 1; r < mpi_size; ++r)
+    {
+        displs[r] = displs[r - 1] + recv_counts[r - 1];
+    }
+
     std::vector<double> all_results;
     if (mpi_rank == 0)
     {
-        all_results.resize(chunk_size * mpi_size * 2);
+        all_results.resize(count * 2);
     }
 
-#ifdef USE_MPI
-    MPI_Gather(recv_results.data(), chunk_size * 2, MPI_DOUBLE,
-               all_results.data(), chunk_size * 2, MPI_DOUBLE,
-               0, MPI_COMM_WORLD);
+    MPI_Gatherv(local_results.data(), my_count * 2, MPI_DOUBLE,
+                mpi_rank == 0 ? all_results.data() : nullptr,
+                recv_counts.data(), displs.data(), MPI_DOUBLE,
+                0, MPI_COMM_WORLD);
 #else
-    all_results = recv_results;
+    std::vector<double> &all_results = local_results;
 #endif
 
-    // Root updates the individual objects
+    // --- 4. Root writes results back into the Individual objects ---
     if (mpi_rank == 0)
     {
         for (int i = 0; i < count; ++i)
@@ -130,25 +156,43 @@ int main(int argc, char **argv)
 
     // --- 1. Config Parsing ---
     json config;
-    if (rank == 0)
     {
-        std::ifstream f(argv[1]);
-        if (!f.is_open())
+        int open_ok = 0;
+        if (rank == 0)
         {
-            std::cerr << "Could not open " << argv[1] << "\n";
+            std::ifstream f(argv[1]);
+            open_ok = f.is_open() ? 1 : 0;
 #ifdef USE_MPI
-            MPI_Abort(MPI_COMM_WORLD, 1);
+            MPI_Bcast(&open_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
-            return 1;
+            if (!open_ok)
+            {
+                std::cerr << "Could not open " << argv[1] << "\n";
+#ifdef USE_MPI
+                MPI_Finalize();
+#endif
+                return 1;
+            }
+            config = json::parse(f);
         }
-        config = json::parse(f);
+        else
+        {
+#ifdef USE_MPI
+            MPI_Bcast(&open_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (!open_ok)
+            {
+                MPI_Finalize();
+                return 1;
+            }
+#endif
+        }
     }
 
 #ifdef USE_MPI
     std::string config_str;
     if (rank == 0)
         config_str = config.dump();
-    int len = config_str.size();
+    int len = static_cast<int>(config_str.size());
     MPI_Bcast(&len, 1, MPI_INT, 0, MPI_COMM_WORLD);
     config_str.resize(len);
     MPI_Bcast(&config_str[0], len, MPI_CHAR, 0, MPI_COMM_WORLD);
@@ -158,31 +202,69 @@ int main(int argc, char **argv)
 
     int pop_size = config["pop_size"];
     int n_gen = config["n_gen"];
-    double time_limit = config.value("time", -1.0);        // seconds; -1 = no limit
-    int save_interval = config.value("save_interval", -1); // gens; -1 = disabled
+    double time_limit = config.value("time", -1.0);
+    int save_interval = config.value("save_interval", -1);
+
+    // --- 2. Load Data (AVOIDING I/O STORMS) ---
+    MTPData mtp;
+    std::vector<double> xtwx, xtwy;
 
     if (rank == 0)
+    {
         std::cout << "Loading MTP and binary data...\n";
+        mtp = parse_mtp(config["mtp_file"]);
+        xtwx = read_binary<double>(config["xtwx_file"]);
+        xtwy = read_binary<double>(config["xtwy_file"]);
+    }
 
-    // --- 2. Load Data ---
-    MTPData mtp = parse_mtp(config["mtp_file"]);
-    auto xtwx = read_binary<double>(config["xtwx_file"]);
-    auto xtwy = read_binary<double>(config["xtwy_file"]);
+#ifdef USE_MPI
+    MPI_Bcast(&mtp.species_count, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&mtp.radial_basis_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&mtp.alpha_moments_count, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&mtp.alpha_scalar_moments, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    auto bcast_int_vec = [](std::vector<int> &vec, int r)
+    {
+        int sz = vec.size();
+        MPI_Bcast(&sz, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (r != 0)
+            vec.resize(sz);
+        if (sz > 0)
+            MPI_Bcast(vec.data(), sz, MPI_INT, 0, MPI_COMM_WORLD);
+    };
+    auto bcast_double_vec = [](std::vector<double> &vec, int r)
+    {
+        int sz = vec.size();
+        MPI_Bcast(&sz, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (r != 0)
+            vec.resize(sz);
+        if (sz > 0)
+            MPI_Bcast(vec.data(), sz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    };
+
+    bcast_int_vec(mtp.alpha_index_basic, rank);
+    bcast_int_vec(mtp.alpha_index_times, rank);
+    bcast_int_vec(mtp.alpha_moment_mapping, rank);
+    bcast_double_vec(xtwx, rank);
+    bcast_double_vec(xtwy, rank);
+#endif
 
     int n_var = mtp.alpha_scalar_moments;
 
     // --- 3. Initialize Evaluators ---
-    SSECalculator sse_calc(xtwx, xtwy, config["ytwy"], config.value("regularization", 0.0),
+    SSECalculator sse_calc(xtwx, xtwy, config["ytwy"],
+                           config.value("regularization", 0.0),
                            mtp.species_count, n_var, rank);
 
-    CostCalculator cost_calc(mtp.alpha_moments_count, mtp.alpha_index_basic, mtp.alpha_index_times,
-                             mtp.alpha_moment_mapping, config["neigh_count"], mtp.radial_basis_size, rank);
+    CostCalculator cost_calc(mtp.alpha_moments_count, mtp.alpha_index_basic,
+                             mtp.alpha_index_times, mtp.alpha_moment_mapping,
+                             config["neigh_count"], mtp.radial_basis_size, rank);
 
     NSGA2 ga(pop_size, n_var, 42 + rank);
     std::vector<Individual> pop;
 
-    // Prepare output directory up front so intermediate saves can use it
-    std::filesystem::path output_dir = std::filesystem::path(config["out_dir"].get<std::string>());
+    std::filesystem::path output_dir =
+        std::filesystem::path(config["out_dir"].get<std::string>());
     if (rank == 0)
     {
         try
@@ -195,15 +277,6 @@ int main(int argc, char **argv)
         }
     }
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    auto elapsed_s = [&]()
-    {
-        return std::chrono::duration<double>(
-                   std::chrono::high_resolution_clock::now() - start_time)
-            .count();
-    };
-
     // --- 4. Initialization & Gen 0 Evaluation ---
     if (rank == 0)
     {
@@ -213,12 +286,20 @@ int main(int argc, char **argv)
 
     evaluate_population(pop, n_var, rank, size, cost_calc, sse_calc);
 
-    // Perform initial ranking/sorting so parents have valid rank/crowding for selection
     if (rank == 0)
     {
         std::vector<Individual> empty_offspring;
         ga.survival(pop, empty_offspring);
     }
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    auto elapsed_s = [&]()
+    {
+        return std::chrono::duration<double>(
+                   std::chrono::high_resolution_clock::now() - start_time)
+            .count();
+    };
 
     // --- 5. Main Optimization Loop ---
     bool time_limit_reached = false;
@@ -227,45 +308,41 @@ int main(int argc, char **argv)
     {
         std::vector<Individual> offspring;
 
-        // A. Generate Offspring (Rank 0 only)
         if (rank == 0)
         {
             ga.generate_offspring(pop, offspring);
         }
 
-        // B. Evaluate ONLY the new Offspring
-        // Note: Parents in 'pop' retain their costs from the previous generation
         evaluate_population(offspring, n_var, rank, size, cost_calc, sse_calc);
 
-        // C. Survival / Elitism (Rank 0 only)
         if (rank == 0)
         {
-            // Merges Parents (pop) + Offspring, sorts, and selects best N into 'pop'
             ga.survival(pop, offspring);
 
             int completed_gen = gen + 1;
-
             if (completed_gen % 10 == 0 || gen == 0)
             {
                 std::cout << "Generation " << completed_gen << "/" << n_gen
                           << " | Elapsed: " << elapsed_s() << "s" << std::endl;
             }
 
-            // D. Intermediate save
             if (save_interval > 0 && completed_gen % save_interval == 0)
             {
-                std::string prefix = (output_dir / ("pareto_" + std::to_string(completed_gen))).string();
-                std::cout << "Saving intermediate results at generation " << completed_gen << "..." << std::endl;
+                std::string prefix =
+                    (output_dir / ("pareto_" + std::to_string(completed_gen)))
+                        .string();
+                std::cout << "Saving intermediate results at generation "
+                          << completed_gen << "..." << std::endl;
                 ga.save_pareto(pop, prefix);
             }
         }
 
-        // E. Check time limit — broadcast decision so all MPI ranks exit together
         int stop = 0;
         if (rank == 0 && time_limit > 0.0 && elapsed_s() >= time_limit)
         {
-            std::cout << "Time limit of " << time_limit << "s reached after generation "
-                      << gen + 1 << ". Stopping early.\n";
+            std::cout << "Time limit of " << time_limit
+                      << "s reached after generation " << gen + 1
+                      << ". Stopping early.\n";
             stop = 1;
             time_limit_reached = true;
         }

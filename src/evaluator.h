@@ -2,7 +2,6 @@
 #include "core.h"
 #include <vector>
 #include <queue>
-#include <cstdint>
 
 extern "C" void dposv_(const char *uplo, const int *n, const int *nrhs,
                        double *a, const int *lda, double *b, const int *ldb, int *info);
@@ -30,10 +29,10 @@ class CostCalculator
     std::vector<int> scalar_indices, basic_indices, parents_data, parents_idx;
     double base_cost;
 
-    // Pre-allocated buffers (using uint8_t to avoid vector<bool> overhead)
-    mutable std::vector<uint8_t> mus_flags_buf;
-    mutable std::vector<uint8_t> rank_flags_buf;
-    mutable std::vector<uint8_t> to_preserve_buf;
+    // Pre-allocated buffers (using char to avoid vector<bool> overhead)
+    mutable std::vector<char> mus_flags_buf;
+    mutable std::vector<char> rank_flags_buf;
+    mutable std::vector<char> to_preserve_buf;
     mutable std::queue<int> q_buf;
 
 public:

@@ -9,14 +9,13 @@ void NSGA2::initialize_population(std::vector<Individual> &pop)
 {
     assert(pop_size >= 2 && "Population size must be at least 2.");
     pop.resize(pop_size);
-    int bytes = (n_var + 7) / 8;
 
     for (int i = 0; i < pop_size; ++i)
     {
-        pop[i].bits.assign(bytes, 0);
+        pop[i].genes.assign(n_var, 0);
         if (i == 1)
         {
-            std::fill(pop[i].bits.begin(), pop[i].bits.end(), 0xFF);
+            std::fill(pop[i].genes.begin(), pop[i].genes.end(), 1);
         }
         else if (i > 1)
         {
@@ -24,7 +23,7 @@ void NSGA2::initialize_population(std::vector<Individual> &pop)
             for (int j = 0; j < n_var; ++j)
             {
                 if (dist(gen))
-                    pop[i].bits[j / 8] |= (1 << (j % 8));
+                    pop[i].genes[j] = 1;
             }
         }
     }
@@ -34,8 +33,8 @@ void NSGA2::generate_offspring(const std::vector<Individual> &parents, std::vect
 {
     offspring.resize(pop_size);
     std::uniform_int_distribution<int> t_dist(0, pop_size - 1);
-    std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
-    std::uniform_int_distribution<int> bit_dist(0, n_var - 1); // Exact single bitflip
+    std::bernoulli_distribution cross_dist(0.5);
+    std::uniform_int_distribution<int> bit_dist(0, n_var - 1);
 
     for (int i = 0; i < pop_size; i += 2)
     {
@@ -45,29 +44,29 @@ void NSGA2::generate_offspring(const std::vector<Individual> &parents, std::vect
         int p3 = t_dist(gen), p4 = t_dist(gen);
         int p2_idx = (parents[p3].rank < parents[p4].rank || (parents[p3].rank == parents[p4].rank && parents[p3].crowding > parents[p4].crowding)) ? p3 : p4;
 
-        offspring[i].bits.resize(parents[0].bits.size());
+        offspring[i].genes.resize(n_var);
         if (i + 1 < pop_size)
-            offspring[i + 1].bits.resize(parents[0].bits.size());
+            offspring[i + 1].genes.resize(n_var);
 
-        // Uniform Crossover
-        for (size_t b = 0; b < parents[0].bits.size(); ++b)
+        // Uniform Crossover (gene-by-gene)
+        for (int b = 0; b < n_var; ++b)
         {
-            uint8_t mask = byte_dist(gen);
-            offspring[i].bits[b] = (parents[p1_idx].bits[b] & mask) | (parents[p2_idx].bits[b] & ~mask);
+            bool swap = cross_dist(gen);
+            offspring[i].genes[b] = swap ? parents[p1_idx].genes[b] : parents[p2_idx].genes[b];
             if (i + 1 < pop_size)
             {
-                offspring[i + 1].bits[b] = (parents[p2_idx].bits[b] & mask) | (parents[p1_idx].bits[b] & ~mask);
+                offspring[i + 1].genes[b] = swap ? parents[p2_idx].genes[b] : parents[p1_idx].genes[b];
             }
         }
 
-        // Single Bit Mutation
+        // Single Gene Mutation
         int bit1 = bit_dist(gen);
-        offspring[i].bits[bit1 / 8] ^= (1 << (bit1 % 8));
+        offspring[i].genes[bit1] ^= 1;
 
         if (i + 1 < pop_size)
         {
             int bit2 = bit_dist(gen);
-            offspring[i + 1].bits[bit2 / 8] ^= (1 << (bit2 % 8));
+            offspring[i + 1].genes[bit2] ^= 1;
         }
     }
 }
@@ -81,12 +80,10 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
     std::vector<int> domination_count(combined.size(), 0);
     std::vector<std::vector<int>> dominates(combined.size());
 
-    // Non-dominated sort
     for (size_t i = 0; i < combined.size(); ++i)
     {
         for (size_t j = i + 1; j < combined.size(); ++j)
         {
-            // FIX 1: Fixed copy-paste error in j_dom_i (sse <= sse)
             bool i_dom_j = (combined[i].cost <= combined[j].cost && combined[i].sse <= combined[j].sse) &&
                            (combined[i].cost < combined[j].cost || combined[i].sse < combined[j].sse);
 
@@ -111,7 +108,6 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
         }
     }
 
-    // FIX 2: Fixed crash by changing loop condition and break logic
     int i = 0;
     while (i < fronts.size())
     {
@@ -130,7 +126,7 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
         }
 
         if (next_front.empty())
-            break; // Stop before incrementing i
+            break;
 
         fronts.push_back(next_front);
         i++;
@@ -142,7 +138,6 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
         if (front.empty())
             continue;
 
-        // Crowding Distance
         for (int idx : front)
             combined[idx].crowding = 0.0;
 
@@ -157,7 +152,7 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
             double min_val = (m == 0) ? combined[front.front()].cost : combined[front.front()].sse;
             double max_val = (m == 0) ? combined[front.back()].cost : combined[front.back()].sse;
 
-            if (max_val - min_val <= 1e-9) // Added small epsilon safety
+            if (max_val - min_val <= 1e-9)
                 continue;
 
             for (size_t j = 1; j < front.size() - 1; ++j)
@@ -213,7 +208,7 @@ void NSGA2::save_pareto(const std::vector<Individual> &pop, const std::string &p
 
         for (int i = 0; i < n_var; ++i)
         {
-            f_pop << (ind.get_bit(i) ? "1" : "0") << (i == n_var - 1 ? "" : ",");
+            f_pop << (ind.get_gene(i) ? "1" : "0") << (i == n_var - 1 ? "" : ",");
         }
         f_pop << "\n";
     }

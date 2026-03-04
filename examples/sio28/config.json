@@ -1,13 +1,13 @@
 {
-  "mtp_file": "/home/richa/Documents/Projects/cpp_prune/examples/sio28/data/28.almtp",
-  "pop_size": 10,
-  "n_gen": 40,
-  "time": 3,
-  "save_interval": 10,
+  "mtp_file": "data/28.almtp",
+  "pop_size": 64,
+  "n_gen": 10,
+  "time": 300,
+  "save_interval": 100,
   "ytwy": 6483714564.848065376281738,
   "regularization": 5e-7,
   "neigh_count": 46.017803,
-  "xtwx_file": "/home/richa/Documents/Projects/cpp_prune/examples/sio28/data/xtwx.bin",
-  "xtwy_file": "/home/richa/Documents/Projects/cpp_prune/examples/sio28/data/xtwy.bin",
-  "out_dir": "/home/richa/Documents/Projects/cpp_prune/examples/sio28/optimization_results"
+  "xtwx_file": "data/xtwx.bin",
+  "xtwy_file": "data/xtwy.bin",
+  "out_dir": "optimization_results"
 }

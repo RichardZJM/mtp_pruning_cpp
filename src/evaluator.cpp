@@ -16,13 +16,12 @@ SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector
         xtwx[i * n_features + i] += reg;
     }
 
-    // Pre-allocate buffers to maximum possible size
     active_buf.reserve(n_features);
     A_buf.resize(n_features * n_features);
     B_buf.resize(n_features);
 
     Individual all_ones;
-    all_ones.bits.resize((n_var + 7) / 8, 0xFF);
+    all_ones.genes.resize(n_var, 1);
     base_sse = 1.0;
     base_sse = calculate(all_ones);
 
@@ -42,7 +41,7 @@ double SSECalculator::calculate(const Individual &ind) const
     int n_var = n_features - n_species;
     for (int i = 0; i < n_var; ++i)
     {
-        if (ind.get_bit(i))
+        if (ind.get_gene(i))
             active_buf.push_back(i + n_species);
     }
 
@@ -108,13 +107,12 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
         parents_idx.push_back(parents_data.size());
     }
 
-    // Initialize buffers
     mus_flags_buf.resize(n_mus);
     rank_flags_buf.resize(n_ranks);
     to_preserve_buf.resize(num_moments);
 
     Individual all_ones;
-    all_ones.bits.resize((scalar_indices.size() + 7) / 8, 0xFF);
+    all_ones.genes.resize(scalar_indices.size(), 1);
     base_cost = 1.0;
     base_cost = calculate(all_ones, scalar_indices.size());
 
@@ -126,18 +124,16 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
 
 double CostCalculator::calculate(const Individual &ind, int n_var) const
 {
-    // Reset buffers
     std::fill(mus_flags_buf.begin(), mus_flags_buf.end(), 0);
     std::fill(rank_flags_buf.begin(), rank_flags_buf.end(), 0);
     std::fill(to_preserve_buf.begin(), to_preserve_buf.end(), 0);
 
-    // Clear queue (efficiently)
     while (!q_buf.empty())
         q_buf.pop();
 
     for (int i = 0; i < n_var; ++i)
     {
-        if (ind.get_bit(i))
+        if (ind.get_gene(i))
         {
             int m = scalar_indices[i];
             if (!to_preserve_buf[m])
@@ -189,10 +185,10 @@ double CostCalculator::calculate(const Individual &ind, int n_var) const
     }
 
     int max_rank = 0, mus_count = 0;
-    for (uint8_t b : rank_flags_buf)
+    for (char b : rank_flags_buf)
         if (b)
             max_rank++;
-    for (uint8_t b : mus_flags_buf)
+    for (char b : mus_flags_buf)
         if (b)
             mus_count++;
 
