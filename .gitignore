@@ -3,9 +3,6 @@ obj/
 bin/
 make/config.mk
 
-# External Dependencies (downloaded via curl)
-external/json.hpp
-
 
 # Output Results
 *.csv
