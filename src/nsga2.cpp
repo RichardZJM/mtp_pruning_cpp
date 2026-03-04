@@ -2,93 +2,100 @@
 #include <algorithm>
 #include <iostream>
 #include <cassert>
+#include <cmath>
+#include <fstream>
 
-NSGA2::NSGA2(int pop_size_, int n_var_, int seed) : pop_size(pop_size_), n_var(n_var_), gen(seed) {}
+NSGA2::NSGA2(int pop_size_, int n_var_, int seed) : pop_size(pop_size_), n_var(n_var_), gen(seed)
+{
+    // Pre-allocate buffers for up to 2 * pop_size to support offspring alongside parents seamlessly
+    genes.resize(2 * pop_size * n_var, 0);
+    cost_sse.resize(2 * pop_size * 2, 0.0);
+    rank.resize(2 * pop_size, 0);
+    crowding.resize(2 * pop_size, 0.0);
+}
 
-void NSGA2::initialize_population(std::vector<Individual> &pop)
+void NSGA2::initialize_population()
 {
     assert(pop_size >= 2 && "Population size must be at least 2.");
-    pop.resize(pop_size);
 
-    for (int i = 0; i < pop_size; ++i)
+    // Clear the first pop_size section
+    std::fill(genes.begin(), genes.begin() + pop_size * n_var, 0);
+
+    // Initial individual [0] is all 0s already.
+    // Ensure individual [1] is all 1s.
+    std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
+
+    for (int i = 2; i < pop_size; ++i)
     {
-        pop[i].genes.assign(n_var, 0);
-        if (i == 1)
+        std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
+        for (int j = 0; j < n_var; ++j)
         {
-            std::fill(pop[i].genes.begin(), pop[i].genes.end(), 1);
-        }
-        else if (i > 1)
-        {
-            std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
-            for (int j = 0; j < n_var; ++j)
-            {
-                if (dist(gen))
-                    pop[i].genes[j] = 1;
-            }
+            if (dist(gen))
+                genes[i * n_var + j] = 1;
         }
     }
 }
 
-void NSGA2::generate_offspring(const std::vector<Individual> &parents, std::vector<Individual> &offspring)
+void NSGA2::generate_offspring()
 {
-    offspring.resize(pop_size);
     std::uniform_int_distribution<int> t_dist(0, pop_size - 1);
     std::bernoulli_distribution cross_dist(0.5);
     std::uniform_int_distribution<int> bit_dist(0, n_var - 1);
 
+    int off_offset = pop_size;
+
     for (int i = 0; i < pop_size; i += 2)
     {
         int p1 = t_dist(gen), p2 = t_dist(gen);
-        int p1_idx = (parents[p1].rank < parents[p2].rank || (parents[p1].rank == parents[p2].rank && parents[p1].crowding > parents[p2].crowding)) ? p1 : p2;
+        int p1_idx = (rank[p1] < rank[p2] || (rank[p1] == rank[p2] && crowding[p1] > crowding[p2])) ? p1 : p2;
 
         int p3 = t_dist(gen), p4 = t_dist(gen);
-        int p2_idx = (parents[p3].rank < parents[p4].rank || (parents[p3].rank == parents[p4].rank && parents[p3].crowding > parents[p4].crowding)) ? p3 : p4;
+        int p2_idx = (rank[p3] < rank[p4] || (rank[p3] == rank[p4] && crowding[p3] > crowding[p4])) ? p3 : p4;
 
-        offspring[i].genes.resize(n_var);
-        if (i + 1 < pop_size)
-            offspring[i + 1].genes.resize(n_var);
+        int o1 = off_offset + i;
+        int o2 = off_offset + i + 1;
 
         // Uniform Crossover (gene-by-gene)
         for (int b = 0; b < n_var; ++b)
         {
             bool swap = cross_dist(gen);
-            offspring[i].genes[b] = swap ? parents[p1_idx].genes[b] : parents[p2_idx].genes[b];
-            if (i + 1 < pop_size)
+            genes[o1 * n_var + b] = swap ? genes[p1_idx * n_var + b] : genes[p2_idx * n_var + b];
+            if (o2 < 2 * pop_size)
             {
-                offspring[i + 1].genes[b] = swap ? parents[p2_idx].genes[b] : parents[p1_idx].genes[b];
+                genes[o2 * n_var + b] = swap ? genes[p2_idx * n_var + b] : genes[p1_idx * n_var + b];
             }
         }
 
         // Single Gene Mutation
         int bit1 = bit_dist(gen);
-        offspring[i].genes[bit1] ^= 1;
+        genes[o1 * n_var + bit1] ^= 1;
 
-        if (i + 1 < pop_size)
+        if (o2 < 2 * pop_size)
         {
             int bit2 = bit_dist(gen);
-            offspring[i + 1].genes[bit2] ^= 1;
+            genes[o2 * n_var + bit2] ^= 1;
         }
     }
 }
 
-void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offspring)
+void NSGA2::survival(int num_inds)
 {
-    std::vector<Individual> combined = pop;
-    combined.insert(combined.end(), offspring.begin(), offspring.end());
-
     std::vector<std::vector<int>> fronts(1);
-    std::vector<int> domination_count(combined.size(), 0);
-    std::vector<std::vector<int>> dominates(combined.size());
+    std::vector<int> domination_count(num_inds, 0);
+    std::vector<std::vector<int>> dominates(num_inds);
 
-    for (size_t i = 0; i < combined.size(); ++i)
+    for (int i = 0; i < num_inds; ++i)
     {
-        for (size_t j = i + 1; j < combined.size(); ++j)
+        for (int j = i + 1; j < num_inds; ++j)
         {
-            bool i_dom_j = (combined[i].cost <= combined[j].cost && combined[i].sse <= combined[j].sse) &&
-                           (combined[i].cost < combined[j].cost || combined[i].sse < combined[j].sse);
+            double cost_i = cost_sse[i * 2], sse_i = cost_sse[i * 2 + 1];
+            double cost_j = cost_sse[j * 2], sse_j = cost_sse[j * 2 + 1];
 
-            bool j_dom_i = (combined[j].cost <= combined[i].cost && combined[j].sse <= combined[i].sse) &&
-                           (combined[j].cost < combined[i].cost || combined[j].sse < combined[i].sse);
+            bool i_dom_j = (cost_i <= cost_j && sse_i <= sse_j) &&
+                           (cost_i < cost_j || sse_i < sse_j);
+
+            bool j_dom_i = (cost_j <= cost_i && sse_j <= sse_i) &&
+                           (cost_j < cost_i || sse_j < sse_i);
 
             if (i_dom_j)
             {
@@ -103,13 +110,13 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
         }
         if (domination_count[i] == 0)
         {
-            combined[i].rank = 0;
+            rank[i] = 0;
             fronts[0].push_back(i);
         }
     }
 
     int i = 0;
-    while (i < fronts.size())
+    while (i < (int)fronts.size())
     {
         std::vector<int> next_front;
         for (int p : fronts[i])
@@ -119,7 +126,7 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
                 domination_count[q]--;
                 if (domination_count[q] == 0)
                 {
-                    combined[q].rank = i + 1;
+                    rank[q] = i + 1;
                     next_front.push_back(q);
                 }
             }
@@ -132,69 +139,95 @@ void NSGA2::survival(std::vector<Individual> &pop, std::vector<Individual> &offs
         i++;
     }
 
-    pop.clear();
+    std::vector<int> next_gen_indices;
+    next_gen_indices.reserve(pop_size);
+
     for (auto &front : fronts)
     {
         if (front.empty())
             continue;
 
         for (int idx : front)
-            combined[idx].crowding = 0.0;
+            crowding[idx] = 0.0;
 
         for (int m = 0; m < 2; ++m)
         {
             std::sort(front.begin(), front.end(), [&](int a, int b)
-                      { return (m == 0) ? combined[a].cost < combined[b].cost : combined[a].sse < combined[b].sse; });
+                      { return (m == 0) ? cost_sse[a * 2] < cost_sse[b * 2] : cost_sse[a * 2 + 1] < cost_sse[b * 2 + 1]; });
 
-            combined[front.front()].crowding = INFINITY;
-            combined[front.back()].crowding = INFINITY;
+            crowding[front.front()] = INFINITY;
+            crowding[front.back()] = INFINITY;
 
-            double min_val = (m == 0) ? combined[front.front()].cost : combined[front.front()].sse;
-            double max_val = (m == 0) ? combined[front.back()].cost : combined[front.back()].sse;
+            double min_val = (m == 0) ? cost_sse[front.front() * 2] : cost_sse[front.front() * 2 + 1];
+            double max_val = (m == 0) ? cost_sse[front.back() * 2] : cost_sse[front.back() * 2 + 1];
 
             if (max_val - min_val <= 1e-9)
                 continue;
 
             for (size_t j = 1; j < front.size() - 1; ++j)
             {
-                double diff = (m == 0) ? combined[front[j + 1]].cost - combined[front[j - 1]].cost
-                                       : combined[front[j + 1]].sse - combined[front[j - 1]].sse;
-                combined[front[j]].crowding += diff / (max_val - min_val);
+                double diff = (m == 0) ? cost_sse[front[j + 1] * 2] - cost_sse[front[j - 1] * 2]
+                                       : cost_sse[front[j + 1] * 2 + 1] - cost_sse[front[j - 1] * 2 + 1];
+                crowding[front[j]] += diff / (max_val - min_val);
             }
         }
 
-        if (pop.size() + front.size() <= (size_t)pop_size)
+        if (next_gen_indices.size() + front.size() <= (size_t)pop_size)
         {
             for (int idx : front)
-                pop.push_back(combined[idx]);
+                next_gen_indices.push_back(idx);
         }
         else
         {
             std::sort(front.begin(), front.end(), [&](int a, int b)
-                      { return combined[a].crowding > combined[b].crowding; });
-            int needed = pop_size - pop.size();
+                      { return crowding[a] > crowding[b]; });
+            int needed = pop_size - next_gen_indices.size();
             for (int j = 0; j < needed; ++j)
-                pop.push_back(combined[front[j]]);
+                next_gen_indices.push_back(front[j]);
             break;
         }
     }
+
+    // Directly reorder into a consistent layout for the next generation
+    std::vector<char> next_genes(pop_size * n_var);
+    std::vector<double> next_cost_sse(pop_size * 2);
+    std::vector<int> next_rank(pop_size);
+    std::vector<double> next_crowding(pop_size);
+
+    for (int k = 0; k < pop_size; ++k)
+    {
+        int old_idx = next_gen_indices[k];
+        std::copy(genes.begin() + old_idx * n_var, genes.begin() + (old_idx + 1) * n_var, next_genes.begin() + k * n_var);
+        next_cost_sse[k * 2] = cost_sse[old_idx * 2];
+        next_cost_sse[k * 2 + 1] = cost_sse[old_idx * 2 + 1];
+        next_rank[k] = rank[old_idx];
+        next_crowding[k] = crowding[old_idx];
+    }
+
+    // Deposit updated info cleanly
+    std::copy(next_genes.begin(), next_genes.end(), genes.begin());
+    std::copy(next_cost_sse.begin(), next_cost_sse.end(), cost_sse.begin());
+    std::copy(next_rank.begin(), next_rank.end(), rank.begin());
+    std::copy(next_crowding.begin(), next_crowding.end(), crowding.begin());
 }
 
-void NSGA2::save_pareto(const std::vector<Individual> &pop, const std::string &prefix)
+void NSGA2::save_pareto(const std::string &prefix)
 {
-    std::vector<Individual> pareto_front;
-    for (const auto &ind : pop)
+    std::vector<int> pareto_front;
+    // We only need to check the first pop_size since these are our survivors.
+    for (int i = 0; i < pop_size; ++i)
     {
-        if (ind.rank == 0)
+        if (rank[i] == 0)
         {
-            pareto_front.push_back(ind);
+            pareto_front.push_back(i);
         }
     }
 
-    std::sort(pareto_front.begin(), pareto_front.end(), [](const Individual &a, const Individual &b)
+    std::sort(pareto_front.begin(), pareto_front.end(), [&](int a, int b)
               {
-        if (std::abs(a.cost - b.cost) > 1e-9) return a.cost < b.cost;
-        return a.sse < b.sse; });
+        if (std::abs(cost_sse[a * 2] - cost_sse[b * 2]) > 1e-9) 
+            return cost_sse[a * 2] < cost_sse[b * 2];
+        return cost_sse[a * 2 + 1] < cost_sse[b * 2 + 1]; });
 
     std::ofstream f_obj(prefix + "_objectives.csv");
     std::ofstream f_pop(prefix + "_population.csv");
@@ -202,13 +235,13 @@ void NSGA2::save_pareto(const std::vector<Individual> &pop, const std::string &p
     if (!f_obj.is_open() || !f_pop.is_open())
         return;
 
-    for (const auto &ind : pareto_front)
+    for (int idx : pareto_front)
     {
-        f_obj << ind.cost << "," << ind.sse << "\n";
+        f_obj << cost_sse[idx * 2] << "," << cost_sse[idx * 2 + 1] << "\n";
 
         for (int i = 0; i < n_var; ++i)
         {
-            f_pop << (ind.get_gene(i) ? "1" : "0") << (i == n_var - 1 ? "" : ",");
+            f_pop << (genes[idx * n_var + i] ? "1" : "0") << (i == n_var - 1 ? "" : ",");
         }
         f_pop << "\n";
     }

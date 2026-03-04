@@ -1,6 +1,6 @@
 {
   "mtp_file": "data/28.almtp",
-  "pop_size": 64,
+  "pop_size": 96,
   "n_gen": 10,
   "time": 300,
   "save_interval": 100,

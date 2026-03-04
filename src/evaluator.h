@@ -1,5 +1,4 @@
 #pragma once
-#include "core.h"
 #include <vector>
 #include <queue>
 
@@ -20,7 +19,7 @@ class SSECalculator
 public:
     SSECalculator(const std::vector<double> &xtwx_, const std::vector<double> &xtwy_,
                   double ytwy_, double reg, int n_species_, int n_var, int rank);
-    double calculate(const Individual &ind) const;
+    double calculate(const char *genes) const;
 };
 
 class CostCalculator
@@ -38,5 +37,5 @@ class CostCalculator
 public:
     CostCalculator(int num_moments_, const std::vector<int> &basic_, const std::vector<int> &times_,
                    const std::vector<int> &scalar_, int neigh, int radial, int rank);
-    double calculate(const Individual &ind, int n_var) const;
+    double calculate(const char *genes, int n_var) const;
 };

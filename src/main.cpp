@@ -3,10 +3,12 @@
 #include "nsga2.h"
 #include "mtp_parser.h"
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include <filesystem>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>
 
 #ifdef USE_MPI
 #include <mpi.h>
@@ -14,103 +16,72 @@
 
 using json = nlohmann::json;
 
-void evaluate_population(std::vector<Individual> &group,
+template <typename T>
+std::vector<T> read_binary(const std::string &filename)
+{
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if (!file)
+        throw std::runtime_error("Cannot open " + filename);
+    size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<T> buffer(size / sizeof(T));
+    if (!file.read(reinterpret_cast<char *>(buffer.data()), size))
+        throw std::runtime_error("Error reading " + filename);
+    return buffer;
+}
+
+void evaluate_population(int offset,
+                         int count,
                          int n_var,
                          int mpi_rank,
                          int mpi_size,
                          CostCalculator &cost_calc,
-                         SSECalculator &sse_calc)
+                         SSECalculator &sse_calc,
+                         std::vector<char> &genes,
+                         std::vector<double> &cost_sse,
+                         std::vector<char> &local_genes,
+                         std::vector<double> &local_results)
 {
-    int count = 0;
-    if (mpi_rank == 0)
-    {
-        count = static_cast<int>(group.size());
-    }
-
-#ifdef USE_MPI
-    MPI_Bcast(&count, 1, MPI_INT, 0, MPI_COMM_WORLD);
-#endif
-
     if (count == 0)
         return;
 
-    // Because pop_size is padded in main(), local_count will always divide perfectly!
     int local_count = count / mpi_size;
     int genes_per_ind = n_var;
 
-    // Buffer for each rank's local share of genes
-    std::vector<char> local_genes(local_count * genes_per_ind);
-
 #ifdef USE_MPI
-    std::vector<char> all_genes;
-    // --- 1. Pack and Scatter genes ---
-    if (mpi_rank == 0)
-    {
-        // We must pack because group[i].genes (std::vector) is not memory contiguous across the population
-        all_genes.resize(count * genes_per_ind);
-        for (int i = 0; i < count; ++i)
-        {
-            std::copy(group[i].genes.begin(),
-                      group[i].genes.end(),
-                      all_genes.begin() + i * genes_per_ind);
-        }
-    }
-
-    MPI_Scatter(mpi_rank == 0 ? all_genes.data() : nullptr,
+    // Master directly provides pointers starting at `offset * genes_per_ind`
+    MPI_Scatter(mpi_rank == 0 ? genes.data() + offset * genes_per_ind : nullptr,
                 local_count * genes_per_ind, MPI_CHAR,
                 local_genes.data(), local_count * genes_per_ind, MPI_CHAR,
                 0, MPI_COMM_WORLD);
 #else
-    // Non-MPI fallback computes directly to save overhead
+    // Non-MPI fallback reads directly from the NSGA object and calculates on the main pointer.
     if (mpi_rank == 0)
     {
         for (int i = 0; i < count; ++i)
         {
-            group[i].cost = cost_calc.calculate(group[i], n_var);
-            group[i].sse = sse_calc.calculate(group[i]);
+            cost_sse[(offset + i) * 2] = cost_calc.calculate(genes.data() + (offset + i) * genes_per_ind, n_var);
+            cost_sse[(offset + i) * 2 + 1] = sse_calc.calculate(genes.data() + (offset + i) * genes_per_ind);
         }
         return;
     }
 #endif
 
 #ifdef USE_MPI
-    // --- 2. Each rank evaluates its perfectly sized slice ---
-    std::vector<double> local_results(local_count * 2);
-
     for (int i = 0; i < local_count; ++i)
     {
-        Individual ind;
-        auto src = local_genes.begin() + i * genes_per_ind;
-        ind.genes.assign(src, src + genes_per_ind);
-
-        double c = cost_calc.calculate(ind, n_var);
-        double s = sse_calc.calculate(ind);
+        double c = cost_calc.calculate(local_genes.data() + i * genes_per_ind, n_var);
+        double s = sse_calc.calculate(local_genes.data() + i * genes_per_ind);
 
         local_results[i * 2] = c;
         local_results[i * 2 + 1] = s;
     }
 
-    // --- 3. Gather results back to root ---
-    std::vector<double> all_results;
-    if (mpi_rank == 0)
-    {
-        all_results.resize(count * 2);
-    }
-
+    // Interlaved pairs format gathers directly onto contiguous master array memory
     MPI_Gather(local_results.data(), local_count * 2, MPI_DOUBLE,
-               mpi_rank == 0 ? all_results.data() : nullptr,
+               mpi_rank == 0 ? cost_sse.data() + offset * 2 : nullptr,
                local_count * 2, MPI_DOUBLE,
                0, MPI_COMM_WORLD);
-
-    // --- 4. Root writes results back into the Individual objects ---
-    if (mpi_rank == 0)
-    {
-        for (int i = 0; i < count; ++i)
-        {
-            group[i].cost = all_results[i * 2];
-            group[i].sse = all_results[i * 2 + 1];
-        }
-    }
 #endif
 }
 
@@ -244,7 +215,7 @@ int main(int argc, char **argv)
 
     int n_var = mtp.alpha_scalar_moments;
 
-    // --- 3. Initialize Evaluators ---
+    // --- 3. Initialize Evaluators and Buffers ---
     SSECalculator sse_calc(xtwx, xtwy, config["ytwy"],
                            config.value("regularization", 0.0),
                            mtp.species_count, n_var, rank);
@@ -254,7 +225,15 @@ int main(int argc, char **argv)
                              config["neigh_count"], mtp.radial_basis_size, rank);
 
     NSGA2 ga(pop_size, n_var, 42 + rank);
-    std::vector<Individual> pop;
+
+    std::vector<char> local_genes;
+    std::vector<double> local_results;
+    if (size > 0)
+    {
+        int local_count = pop_size / size;
+        local_genes.resize(local_count * n_var);
+        local_results.resize(local_count * 2);
+    }
 
     std::filesystem::path output_dir =
         std::filesystem::path(config["out_dir"].get<std::string>());
@@ -273,16 +252,18 @@ int main(int argc, char **argv)
     // --- 4. Initialization & Gen 0 Evaluation ---
     if (rank == 0)
     {
-        ga.initialize_population(pop);
+        ga.initialize_population();
         std::cout << "Evaluating initial population..." << std::endl;
     }
 
-    evaluate_population(pop, n_var, rank, size, cost_calc, sse_calc);
+    // Evaluate gen 0 evaluating directly at index 0 up to pop_size bounds
+    evaluate_population(0, pop_size, n_var, rank, size, cost_calc, sse_calc,
+                        ga.genes, ga.cost_sse, local_genes, local_results);
 
     if (rank == 0)
     {
-        std::vector<Individual> empty_offspring;
-        ga.survival(pop, empty_offspring);
+        // Survival run isolated to rank population count itself to initialize parameters natively
+        ga.survival(pop_size);
     }
 
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -299,18 +280,19 @@ int main(int argc, char **argv)
 
     for (int gen = 0; gen < n_gen; ++gen)
     {
-        std::vector<Individual> offspring;
-
         if (rank == 0)
         {
-            ga.generate_offspring(pop, offspring);
+            // Populate next pop_size sequence right inline natively over bounds
+            ga.generate_offspring();
         }
 
-        evaluate_population(offspring, n_var, rank, size, cost_calc, sse_calc);
+        // Evaluate offspring generated at index `pop_size` up to count `pop_size` lengths
+        evaluate_population(pop_size, pop_size, n_var, rank, size, cost_calc, sse_calc,
+                            ga.genes, ga.cost_sse, local_genes, local_results);
 
         if (rank == 0)
         {
-            ga.survival(pop, offspring);
+            ga.survival(2 * pop_size);
 
             int completed_gen = gen + 1;
             if (completed_gen % 10 == 0 || gen == 0)
@@ -326,7 +308,7 @@ int main(int argc, char **argv)
                         .string();
                 std::cout << "Saving intermediate results at generation "
                           << completed_gen << "..." << std::endl;
-                ga.save_pareto(pop, prefix);
+                ga.save_pareto(prefix);
             }
         }
 
@@ -352,7 +334,7 @@ int main(int argc, char **argv)
     if (rank == 0)
     {
         std::filesystem::path out_path = output_dir / "pareto_final";
-        ga.save_pareto(pop, out_path.string());
+        ga.save_pareto(out_path.string());
 
         std::cout << "Optimization finished in " << elapsed_s() << "s";
         if (time_limit_reached)

@@ -20,10 +20,9 @@ SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector
     A_buf.resize(n_features * n_features);
     B_buf.resize(n_features);
 
-    Individual all_ones;
-    all_ones.genes.resize(n_var, 1);
+    std::vector<char> all_ones(n_var, 1);
     base_sse = 1.0;
-    base_sse = calculate(all_ones);
+    base_sse = calculate(all_ones.data());
 
     if (rank == 0)
     {
@@ -31,7 +30,7 @@ SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector
     }
 }
 
-double SSECalculator::calculate(const Individual &ind) const
+double SSECalculator::calculate(const char *genes) const
 {
     active_buf.clear();
 
@@ -41,7 +40,7 @@ double SSECalculator::calculate(const Individual &ind) const
     int n_var = n_features - n_species;
     for (int i = 0; i < n_var; ++i)
     {
-        if (ind.get_gene(i))
+        if (genes[i])
             active_buf.push_back(i + n_species);
     }
 
@@ -111,10 +110,9 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
     rank_flags_buf.resize(n_ranks);
     to_preserve_buf.resize(num_moments);
 
-    Individual all_ones;
-    all_ones.genes.resize(scalar_indices.size(), 1);
+    std::vector<char> all_ones(scalar_indices.size(), 1);
     base_cost = 1.0;
-    base_cost = calculate(all_ones, scalar_indices.size());
+    base_cost = calculate(all_ones.data(), scalar_indices.size());
 
     if (rank == 0)
     {
@@ -122,7 +120,7 @@ CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
     }
 }
 
-double CostCalculator::calculate(const Individual &ind, int n_var) const
+double CostCalculator::calculate(const char *genes, int n_var) const
 {
     std::fill(mus_flags_buf.begin(), mus_flags_buf.end(), 0);
     std::fill(rank_flags_buf.begin(), rank_flags_buf.end(), 0);
@@ -133,7 +131,7 @@ double CostCalculator::calculate(const Individual &ind, int n_var) const
 
     for (int i = 0; i < n_var; ++i)
     {
-        if (ind.get_gene(i))
+        if (genes[i])
         {
             int m = scalar_indices[i];
             if (!to_preserve_buf[m])
