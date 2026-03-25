@@ -24,9 +24,9 @@ public:
 
 class CostCalculator
 {
-    int num_moments, n_ranks, n_mus, neigh_count, radial_basis_size;
+    int num_moments, n_ranks, n_mus, radial_basis_size;
     std::vector<int> scalar_indices, basic_indices, parents_data, parents_idx;
-    double base_cost;
+    double base_cost, neigh_count;
 
     // Pre-allocated buffers (using char to avoid vector<bool> overhead)
     mutable std::vector<char> mus_flags_buf;
@@ -36,6 +36,6 @@ class CostCalculator
 
 public:
     CostCalculator(int num_moments_, const std::vector<int> &basic_, const std::vector<int> &times_,
-                   const std::vector<int> &scalar_, int neigh, int radial, int rank);
+                   const std::vector<int> &scalar_, double neigh_count, int radial, int rank);
     double calculate(const char *genes, int n_var) const;
 };

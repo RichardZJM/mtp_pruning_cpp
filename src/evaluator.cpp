@@ -76,7 +76,7 @@ double SSECalculator::calculate(const char *genes) const
 // --- Cost Calculator ---
 CostCalculator::CostCalculator(int num_moments_, const std::vector<int> &basic_,
                                const std::vector<int> &times_, const std::vector<int> &scalar_,
-                               int neigh, int radial, int rank)
+                               double neigh, int radial, int rank)
     : num_moments(num_moments_), basic_indices(basic_), scalar_indices(scalar_),
       neigh_count(neigh), radial_basis_size(radial)
 {

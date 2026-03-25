@@ -34,6 +34,18 @@ void NSGA2::initialize_population()
                 genes[i * n_var + j] = 1;
         }
     }
+
+    for (int i = pop_size - 1; i > 0; --i)
+    {
+        std::uniform_int_distribution<int> swap_dist(0, i);
+        int j = swap_dist(gen);
+        if (i != j)
+        {
+            std::swap_ranges(genes.begin() + i * n_var,
+                             genes.begin() + (i + 1) * n_var,
+                             genes.begin() + j * n_var);
+        }
+    }
 }
 
 void NSGA2::generate_offspring()
