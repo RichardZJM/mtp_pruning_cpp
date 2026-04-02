@@ -16,7 +16,7 @@ public:
     std::vector<double> crowding; // length: 2 * pop_size
 
     NSGA2(int pop_size_, int n_var_, int seed);
-    void initialize_population();
+    void initialize_population(const std::string &pop_file = "");
     void generate_offspring();
     void survival(int num_inds);
     void save_pareto(const std::string &prefix);

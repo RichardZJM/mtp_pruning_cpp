@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 
 NSGA2::NSGA2(int pop_size_, int n_var_, int seed) : pop_size(pop_size_), n_var(n_var_), gen(seed)
 {
@@ -14,27 +15,65 @@ NSGA2::NSGA2(int pop_size_, int n_var_, int seed) : pop_size(pop_size_), n_var(n
     crowding.resize(2 * pop_size, 0.0);
 }
 
-void NSGA2::initialize_population()
+void NSGA2::initialize_population(const std::string &pop_file)
 {
     assert(pop_size >= 2 && "Population size must be at least 2.");
 
     // Clear the first pop_size section
     std::fill(genes.begin(), genes.begin() + pop_size * n_var, 0);
 
-    // Initial individual [0] is all 0s already.
-    // Ensure individual [1] is all 1s.
-    std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
-
-    for (int i = 2; i < pop_size; ++i)
+    int loaded_count = 0;
+    if (!pop_file.empty())
     {
-        std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
-        for (int j = 0; j < n_var; ++j)
+        std::ifstream f(pop_file);
+        if (f.is_open())
         {
-            if (dist(gen))
-                genes[i * n_var + j] = 1;
+            std::string line;
+            while (std::getline(f, line) && loaded_count < pop_size)
+            {
+                std::stringstream ss(line);
+                std::string token;
+                int j = 0;
+                while (std::getline(ss, token, ',') && j < n_var)
+                {
+                    if (token == "1")
+                        genes[loaded_count * n_var + j] = 1;
+                    else
+                        genes[loaded_count * n_var + j] = 0;
+                    ++j;
+                }
+                loaded_count++;
+            }
         }
     }
 
+    if (loaded_count < pop_size)
+    {
+        int start_idx = loaded_count;
+        if (start_idx == 0)
+        {
+            // Initial individual [0] is all 0s already.
+            std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
+            start_idx = 2;
+        }
+        else if (start_idx == 1)
+        {
+            std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
+            start_idx = 2;
+        }
+
+        for (int i = start_idx; i < pop_size; ++i)
+        {
+            std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
+            for (int j = 0; j < n_var; ++j)
+            {
+                if (dist(gen))
+                    genes[i * n_var + j] = 1;
+            }
+        }
+    }
+
+    // Scramble population using Fisher-Yates across chunk sizes of n_var
     for (int i = pop_size - 1; i > 0; --i)
     {
         std::uniform_int_distribution<int> swap_dist(0, i);

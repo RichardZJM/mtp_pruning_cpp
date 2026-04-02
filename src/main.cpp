@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <iomanip> // For std::setprecision
+#include <string>
 
 #ifdef USE_MPI
 #include <mpi.h>
@@ -32,6 +33,49 @@ std::vector<T> read_binary(const std::string &filename)
     if (!file.read(reinterpret_cast<char *>(buffer.data()), size))
         throw std::runtime_error("Error reading " + filename);
     return buffer;
+}
+
+std::string find_latest_population(const std::filesystem::path &dir)
+{
+    if (!std::filesystem::exists(dir))
+        return "";
+
+    std::string final_pop = (dir / "pareto_final_population.csv").string();
+    if (std::filesystem::exists(final_pop))
+    {
+        return final_pop;
+    }
+
+    int max_gen = -1;
+    std::string latest_pop = "";
+    for (const auto &entry : std::filesystem::directory_iterator(dir))
+    {
+        if (entry.is_regular_file())
+        {
+            std::string filename = entry.path().filename().string();
+            if (filename.rfind("pareto_", 0) == 0 && filename.find("_population.csv") != std::string::npos)
+            {
+                size_t p1 = 7; // length of "pareto_"
+                size_t p2 = filename.find("_population.csv");
+                if (p2 != std::string::npos && p2 > p1)
+                {
+                    try
+                    {
+                        int gen = std::stoi(filename.substr(p1, p2 - p1));
+                        if (gen > max_gen)
+                        {
+                            max_gen = gen;
+                            latest_pop = entry.path().string();
+                        }
+                    }
+                    catch (...)
+                    {
+                    } // Ignore files that don't match integer formatting
+                }
+            }
+        }
+    }
+    return latest_pop;
 }
 
 void evaluate_population(int offset,
@@ -283,10 +327,37 @@ int main(int argc, char **argv)
         local_results.resize(local_count * 2);
     }
 
-    std::filesystem::path output_dir =
-        std::filesystem::path(config["out_dir"].get<std::string>());
+    // Determine output directory mapping & Handle restarting
+    std::string latest_pop_file = "";
+    std::filesystem::path output_dir = config["out_dir"].get<std::string>();
+
     if (rank == 0)
     {
+        std::string base_out_dir_str = output_dir.string();
+        // Remove trailing slash if present for cleaner numbering appending
+        if (!base_out_dir_str.empty() && base_out_dir_str.back() == '/')
+        {
+            base_out_dir_str.pop_back();
+        }
+
+        int restart_count = 1;
+        while (std::filesystem::exists(output_dir))
+        {
+            restart_count++;
+            output_dir = std::filesystem::path(base_out_dir_str + "_" + std::to_string(restart_count));
+        }
+
+        // Search backwards sequentially to find the most recent valid save we can load from
+        for (int r = restart_count - 1; r >= 1; --r)
+        {
+            std::filesystem::path check_dir = (r == 1) ? std::filesystem::path(base_out_dir_str) : std::filesystem::path(base_out_dir_str + "_" + std::to_string(r));
+            latest_pop_file = find_latest_population(check_dir);
+            if (!latest_pop_file.empty())
+            {
+                break;
+            }
+        }
+
         try
         {
             std::filesystem::create_directories(output_dir);
@@ -295,6 +366,13 @@ int main(int argc, char **argv)
         {
             std::cerr << "Error creating directory: " << e.what() << "\n";
         }
+
+        if (!latest_pop_file.empty())
+        {
+            std::cout << "Restarting from previous results: " << latest_pop_file << "\n";
+            std::cout << "Insufficient populations will be randomly generated. The population will be scrambled.\n";
+        }
+        std::cout << "Saving new results to: " << output_dir.string() << "\n";
     }
 
     // Set tracking variables
@@ -315,7 +393,7 @@ int main(int argc, char **argv)
     // --- 4. Initialization & Gen 0 Evaluation ---
     if (rank == 0)
     {
-        ga.initialize_population();
+        ga.initialize_population(latest_pop_file);
         std::cout << "Evaluating initial population..." << std::endl;
     }
 
