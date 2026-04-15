@@ -62,9 +62,13 @@ void NSGA2::initialize_population(const std::string &pop_file)
             start_idx = 2;
         }
 
+        int remaining = pop_size - start_idx;
         for (int i = start_idx; i < pop_size; ++i)
         {
-            std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
+            // Evenly distribute probabilities for the newly generated batch between 0 and 1
+            double prob = (remaining > 1) ? (double)(i - start_idx) / (remaining - 1) : 0.5;
+
+            std::bernoulli_distribution dist(prob);
             for (int j = 0; j < n_var; ++j)
             {
                 if (dist(gen))
