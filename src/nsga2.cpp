@@ -36,6 +36,9 @@ void NSGA2::initialize_population(const std::string &pop_file)
                 int j = 0;
                 while (std::getline(ss, token, ',') && j < n_var)
                 {
+                    // Strip trailing carriage return just in case (Windows CSVs)
+                    if (!token.empty() && token.back() == '\r') token.pop_back();
+
                     if (token == "1")
                         genes[loaded_count * n_var + j] = 1;
                     else
@@ -47,28 +50,16 @@ void NSGA2::initialize_population(const std::string &pop_file)
         }
     }
 
-    if (loaded_count < pop_size)
+    if (loaded_count == 0)
     {
-        int start_idx = loaded_count;
-        if (start_idx == 0)
-        {
-            // Initial individual [0] is all 0s already.
-            std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
-            start_idx = 2;
-        }
-        else if (start_idx == 1)
-        {
-            std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
-            start_idx = 2;
-        }
+        // --- FRESH RUN ---
+        // Initial individual [0] is all 0s already.
+        // Ensure individual [1] is all 1s.
+        std::fill(genes.begin() + n_var, genes.begin() + 2 * n_var, 1);
 
-        int remaining = pop_size - start_idx;
-        for (int i = start_idx; i < pop_size; ++i)
+        for (int i = 2; i < pop_size; ++i)
         {
-            // Evenly distribute probabilities for the newly generated batch between 0 and 1
-            double prob = (remaining > 1) ? (double)(i - start_idx) / (remaining - 1) : 0.5;
-
-            std::bernoulli_distribution dist(prob);
+            std::bernoulli_distribution dist((double)(i - 1) / (pop_size - 1));
             for (int j = 0; j < n_var; ++j)
             {
                 if (dist(gen))
@@ -76,8 +67,40 @@ void NSGA2::initialize_population(const std::string &pop_file)
             }
         }
     }
+    else if (loaded_count < pop_size)
+    {
+        // --- PARTIAL RESTART ---
+        // Recombine the loaded population to fill the remaining slots
+        std::uniform_int_distribution<int> parent_dist(0, loaded_count - 1);
+        std::bernoulli_distribution cross_dist(0.5);
+        
+        // 5% mutation rate injects healthy diversity into the new offspring 
+        // without completely destroying the Pareto traits.
+        std::bernoulli_distribution mut_dist(0.05);
+
+        for (int i = loaded_count; i < pop_size; ++i)
+        {
+            int p1 = parent_dist(gen);
+            int p2 = parent_dist(gen);
+
+            for (int j = 0; j < n_var; ++j)
+            {
+                // Uniform crossover
+                char gene_val = cross_dist(gen) ? genes[p1 * n_var + j] : genes[p2 * n_var + j];
+                
+                // Mutation
+                if (mut_dist(gen))
+                {
+                    gene_val ^= 1;
+                }
+                
+                genes[i * n_var + j] = gene_val;
+            }
+        }
+    }
 
     // Scramble population using Fisher-Yates across chunk sizes of n_var
+    // (This also perfectly load-balances dense models across MPI nodes)
     for (int i = pop_size - 1; i > 0; --i)
     {
         std::uniform_int_distribution<int> swap_dist(0, i);
