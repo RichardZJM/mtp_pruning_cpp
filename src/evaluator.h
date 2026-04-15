@@ -38,4 +38,5 @@ public:
     CostCalculator(int num_moments_, const std::vector<int> &basic_, const std::vector<int> &times_,
                    const std::vector<int> &scalar_, double neigh_count, int radial, int rank);
     double calculate(const char *genes, int n_var) const;
+    void canonicalize(char *genes, int n_var) const;
 };

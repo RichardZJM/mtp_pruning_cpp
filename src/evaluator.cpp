@@ -196,3 +196,70 @@ double CostCalculator::calculate(const char *genes, int n_var) const
 
     return cost / base_cost;
 }
+
+void CostCalculator::canonicalize(char *genes, int n_var) const
+{
+    // 1. FREE-RIDE RULE
+    // Identify logically required tree elements dictated by raw active genes
+    calculate(genes, n_var);
+
+    // Promote natively preserved moments to full active genes for free regressions
+    for (int i = 0; i < n_var; ++i)
+    {
+        if (to_preserve_buf[scalar_indices[i]])
+        {
+            genes[i] = 1;
+        }
+    }
+
+    // 2. FILL RULE
+    double raw_cost = calculate(genes, n_var);
+    double current_cost = raw_cost;
+
+    std::vector<char> rejected(n_var, 0); // Optimization to track failed Fill rule checks
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (int i = 0; i < n_var; ++i)
+        {
+            if (!genes[i] && !rejected[i])
+            {
+                int m = scalar_indices[i];
+                bool deps_met = false;
+
+                // If moment has dependencies, verify all are already preserved
+                if (parents_idx[m] < parents_idx[m + 1])
+                {
+                    deps_met = true;
+                    for (int j = parents_idx[m]; j < parents_idx[m + 1]; ++j)
+                    {
+                        if (!to_preserve_buf[parents_data[j]])
+                        {
+                            deps_met = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (deps_met)
+                {
+                    genes[i] = 1;
+                    double new_cost = calculate(genes, n_var);
+
+                    if (new_cost - current_cost <= 0.10 * raw_cost)
+                    {
+                        changed = true;
+                        current_cost = new_cost;
+                    }
+                    else
+                    {
+                        genes[i] = 0;
+                        rejected[i] = 1;
+                        calculate(genes, n_var); // Revert to_preserve_buf to cleanly process the next item
+                    }
+                }
+            }
+        }
+    }
+}

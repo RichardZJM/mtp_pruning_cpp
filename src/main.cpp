@@ -119,6 +119,10 @@ void evaluate_population(int offset,
         auto start_eval = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < count; ++i)
         {
+            // Lamarckian Repair (Canonicalize sequentially)
+            cost_calc.canonicalize(genes.data() + (offset + i) * genes_per_ind, n_var);
+
+            // Objective extraction
             cost_sse[(offset + i) * 2] = cost_calc.calculate(genes.data() + (offset + i) * genes_per_ind, n_var);
             cost_sse[(offset + i) * 2 + 1] = sse_calc.calculate(genes.data() + (offset + i) * genes_per_ind);
         }
@@ -131,6 +135,9 @@ void evaluate_population(int offset,
     double start_eval = MPI_Wtime();
     for (int i = 0; i < local_count; ++i)
     {
+        // Lamarckian Repair
+        cost_calc.canonicalize(local_genes.data() + i * genes_per_ind, n_var);
+
         double c = cost_calc.calculate(local_genes.data() + i * genes_per_ind, n_var);
         double s = sse_calc.calculate(local_genes.data() + i * genes_per_ind);
 
@@ -142,6 +149,12 @@ void evaluate_population(int offset,
     double t2 = 0;
     if (mpi_rank == 0)
         t2 = MPI_Wtime();
+
+    // Synchronize repaired sequence masks back to the NSGA master
+    MPI_Gather(local_genes.data(), local_count * genes_per_ind, MPI_CHAR,
+               mpi_rank == 0 ? genes.data() + offset * genes_per_ind : nullptr,
+               local_count * genes_per_ind, MPI_CHAR,
+               0, MPI_COMM_WORLD);
 
     // Interleaved pairs format gathers directly onto contiguous master array memory
     MPI_Gather(local_results.data(), local_count * 2, MPI_DOUBLE,
