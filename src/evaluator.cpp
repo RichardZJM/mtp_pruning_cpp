@@ -200,10 +200,9 @@ double CostCalculator::calculate(const char *genes, int n_var) const
 void CostCalculator::canonicalize(char *genes, int n_var) const
 {
     // 1. FREE-RIDE RULE
-    // Identify logically required tree elements dictated by raw active genes
-    calculate(genes, n_var);
+    // Calculate raw tree exactly ONCE. This populates `to_preserve_buf`, `mus_flags_buf`, and `rank_flags_buf`
+    double raw_cost = calculate(genes, n_var);
 
-    // Promote natively preserved moments to full active genes for free regressions
     for (int i = 0; i < n_var; ++i)
     {
         if (to_preserve_buf[scalar_indices[i]])
@@ -212,51 +211,71 @@ void CostCalculator::canonicalize(char *genes, int n_var) const
         }
     }
 
-    // 2. FILL RULE
-    double raw_cost = calculate(genes, n_var);
-    double current_cost = raw_cost;
+    // 2. FAST FILL RULE
+    // Calculate the absolute allowable threshold relative to the raw tree.
+    double max_incremental_cost = 0.10 * (raw_cost * base_cost);
 
-    std::vector<char> rejected(n_var, 0); // Optimization to track failed Fill rule checks
     bool changed = true;
     while (changed)
     {
         changed = false;
         for (int i = 0; i < n_var; ++i)
         {
-            if (!genes[i] && !rejected[i])
+            if (!genes[i])
             {
                 int m = scalar_indices[i];
-                bool deps_met = false;
 
-                // If moment has dependencies, verify all are already preserved
-                if (parents_idx[m] < parents_idx[m + 1])
+                // Check if all immediate dependencies are strictly met in O(1) checks
+                bool deps_met = true;
+                for (int j = parents_idx[m]; j < parents_idx[m + 1]; ++j)
                 {
-                    deps_met = true;
-                    for (int j = parents_idx[m]; j < parents_idx[m + 1]; ++j)
+                    if (!to_preserve_buf[parents_data[j]])
                     {
-                        if (!to_preserve_buf[parents_data[j]])
-                        {
-                            deps_met = false;
-                            break;
-                        }
+                        deps_met = false;
+                        break;
                     }
                 }
 
                 if (deps_met)
                 {
-                    genes[i] = 1;
-                    double new_cost = calculate(genes, n_var);
+                    // Calculate exact incremental cost without traversing the tree
+                    double incremental_cost = 0;
+                    int edges = (parents_idx[m + 1] - parents_idx[m]) / 2;
 
-                    if (new_cost - current_cost <= 0.10 * raw_cost)
+                    if (edges > 0)
                     {
-                        changed = true;
-                        current_cost = new_cost;
+                        incremental_cost = 9 * edges;
                     }
                     else
                     {
-                        genes[i] = 0;
-                        rejected[i] = 1;
-                        calculate(genes, n_var); // Revert to_preserve_buf to cleanly process the next item
+                        incremental_cost = neigh_count * 39;
+                        int mu = basic_indices[m * 4];
+                        int r = std::max({basic_indices[m * 4 + 1], basic_indices[m * 4 + 2], basic_indices[m * 4 + 3]});
+
+                        if (mu < n_mus && !mus_flags_buf[mu])
+                            incremental_cost += neigh_count * 4 * radial_basis_size;
+                        if (r < n_ranks && !rank_flags_buf[r])
+                            incremental_cost += neigh_count * 4;
+                    }
+
+                    if (incremental_cost <= max_incremental_cost)
+                    {
+                        // Unionize: apply the gene and update the state arrays immediately
+                        genes[i] = 1;
+                        to_preserve_buf[m] = 1;
+
+                        if (edges == 0)
+                        {
+                            int mu = basic_indices[m * 4];
+                            int r = std::max({basic_indices[m * 4 + 1], basic_indices[m * 4 + 2], basic_indices[m * 4 + 3]});
+                            if (mu < n_mus)
+                                mus_flags_buf[mu] = 1;
+                            if (r < n_ranks)
+                                rank_flags_buf[r] = 1;
+                        }
+
+                        // We loop again in case newly accepted nodes trigger other nodes' dependencies
+                        changed = true;
                     }
                 }
             }
