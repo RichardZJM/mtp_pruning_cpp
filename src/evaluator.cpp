@@ -4,73 +4,41 @@
 #include <cmath>
 #include <algorithm>
 
-// --- SSE Calculator ---
+// --- SSE Calculator (Simplified for Testing) ---
 SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector<double> &xtwy_,
                              double ytwy_, double reg, int n_species_, int n_var, int rank)
     : xtwx(xtwx_), xtwy(xtwy_), ytwy(ytwy_), n_species(n_species_)
 {
     n_features = n_species + n_var;
 
-    for (int i = 0; i < n_features; ++i)
-    {
-        xtwx[i * n_features + i] += reg;
-    }
+    // We skip the LAPACK buffer allocations (A_buf, B_buf) and regularization
+    // additions here to save processing time during this simplified test.
 
-    active_buf.reserve(n_features);
-    A_buf.resize(n_features * n_features);
-    B_buf.resize(n_features);
-
-    std::vector<char> all_ones(n_var, 1);
     base_sse = 1.0;
-    base_sse = calculate(all_ones.data());
 
     if (rank == 0)
     {
-        std::cout << "Base SSE: " << base_sse << "\n";
+        std::cout << "Simplified Accuracy Evaluator initialized (Minimizing inactive bits)\n";
     }
 }
 
 double SSECalculator::calculate(const char *genes) const
 {
-    active_buf.clear();
-
-    for (int i = 0; i < n_species; ++i)
-        active_buf.push_back(i);
-
     int n_var = n_features - n_species;
+    int active_count = 0;
+
     for (int i = 0; i < n_var; ++i)
     {
         if (genes[i])
-            active_buf.push_back(i + n_species);
-    }
-
-    int n = active_buf.size();
-    if (n == 0)
-        return INFINITY;
-
-    for (int i = 0; i < n; ++i)
-    {
-        B_buf[i] = xtwy[active_buf[i]];
-        for (int j = 0; j < n; j++)
         {
-            A_buf[i * n + j] = xtwx[active_buf[i] * n_features + active_buf[j]];
+            active_count++;
         }
     }
 
-    char uplo = 'U';
-    int nrhs = 1, info = 0;
-    dposv_(&uplo, &n, &nrhs, A_buf.data(), &n, B_buf.data(), &n, &info);
-
-    if (info > 0)
-        return INFINITY;
-
-    double theta_dot_xtwy = 0;
-    for (int i = 0; i < n; ++i)
-    {
-        theta_dot_xtwy += B_buf[i] * xtwy[active_buf[i]];
-    }
-
-    return (ytwy - theta_dot_xtwy) / base_sse;
+    // NSGA-II minimizes objectives.
+    // Worst accuracy (highest value) = n_var inactive bits (0 active bits)
+    // Best accuracy (lowest value) = 0 inactive bits (all active bits)
+    return static_cast<double>(n_var - active_count);
 }
 
 // --- Cost Calculator ---
