@@ -6,7 +6,7 @@ make/config.mk
 
 # Output Results
 *.csv
-optimization_results
+optimization_results*
 perf.data
 
 # HPC Job Logs
