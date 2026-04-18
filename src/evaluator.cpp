@@ -5,16 +5,10 @@
 #include <algorithm>
 
 // --- SSE Calculator (Simplified for Testing) ---
-SSECalculator::SSECalculator(const std::vector<double> &xtwx_, const std::vector<double> &xtwy_,
-                             double ytwy_, double reg, int n_species_, int n_var, int rank)
-    : xtwx(xtwx_), xtwy(xtwy_), ytwy(ytwy_), n_species(n_species_)
+SSECalculator::SSECalculator(int n_species_, int n_var, int rank)
+    : n_species(n_species_)
 {
     n_features = n_species + n_var;
-
-    // We skip the LAPACK buffer allocations (A_buf, B_buf) and regularization
-    // additions here to save processing time during this simplified test.
-
-    base_sse = 1.0;
 
     if (rank == 0)
     {
@@ -168,7 +162,6 @@ double CostCalculator::calculate(const char *genes, int n_var) const
 void CostCalculator::canonicalize(char *genes, int n_var) const
 {
     // 1. FREE-RIDE RULE
-    // Calculate raw tree exactly ONCE. This populates `to_preserve_buf`, `mus_flags_buf`, and `rank_flags_buf`
     double raw_cost = calculate(genes, n_var);
 
     for (int i = 0; i < n_var; ++i)
@@ -180,7 +173,6 @@ void CostCalculator::canonicalize(char *genes, int n_var) const
     }
 
     // 2. FAST FILL RULE
-    // Calculate the absolute allowable threshold relative to the raw tree.
     double max_incremental_cost = 0.10 * (raw_cost * base_cost);
 
     bool changed = true;
@@ -192,8 +184,6 @@ void CostCalculator::canonicalize(char *genes, int n_var) const
             if (!genes[i])
             {
                 int m = scalar_indices[i];
-
-                // Check if all immediate dependencies are strictly met in O(1) checks
                 bool deps_met = true;
                 for (int j = parents_idx[m]; j < parents_idx[m + 1]; ++j)
                 {
@@ -206,7 +196,6 @@ void CostCalculator::canonicalize(char *genes, int n_var) const
 
                 if (deps_met)
                 {
-                    // Calculate exact incremental cost without traversing the tree
                     double incremental_cost = 0;
                     int edges = (parents_idx[m + 1] - parents_idx[m]) / 2;
 
@@ -228,7 +217,6 @@ void CostCalculator::canonicalize(char *genes, int n_var) const
 
                     if (incremental_cost <= max_incremental_cost)
                     {
-                        // Unionize: apply the gene and update the state arrays immediately
                         genes[i] = 1;
                         to_preserve_buf[m] = 1;
 
@@ -241,8 +229,6 @@ void CostCalculator::canonicalize(char *genes, int n_var) const
                             if (r < n_ranks)
                                 rank_flags_buf[r] = 1;
                         }
-
-                        // We loop again in case newly accepted nodes trigger other nodes' dependencies
                         changed = true;
                     }
                 }

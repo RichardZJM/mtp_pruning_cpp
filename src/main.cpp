@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstdlib>
-#include <iomanip> // For std::setprecision
+#include <iomanip>
 #include <string>
 
 #ifdef USE_MPI
@@ -20,20 +20,6 @@
 #include <dlfcn.h>
 
 using json = nlohmann::json;
-
-template <typename T>
-std::vector<T> read_binary(const std::string &filename)
-{
-    std::ifstream file(filename, std::ios::binary | std::ios::ate);
-    if (!file)
-        throw std::runtime_error("Cannot open " + filename);
-    size_t size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<T> buffer(size / sizeof(T));
-    if (!file.read(reinterpret_cast<char *>(buffer.data()), size))
-        throw std::runtime_error("Error reading " + filename);
-    return buffer;
-}
 
 std::string find_latest_population(const std::filesystem::path &dir)
 {
@@ -55,7 +41,7 @@ std::string find_latest_population(const std::filesystem::path &dir)
             std::string filename = entry.path().filename().string();
             if (filename.rfind("pareto_", 0) == 0 && filename.find("_population.csv") != std::string::npos)
             {
-                size_t p1 = 7; // length of "pareto_"
+                size_t p1 = 7;
                 size_t p2 = filename.find("_population.csv");
                 if (p2 != std::string::npos && p2 > p1)
                 {
@@ -70,7 +56,7 @@ std::string find_latest_population(const std::filesystem::path &dir)
                     }
                     catch (...)
                     {
-                    } // Ignore files that don't match integer formatting
+                    }
                 }
             }
         }
@@ -104,7 +90,6 @@ void evaluate_population(int offset,
     if (mpi_rank == 0)
         t0 = MPI_Wtime();
 
-    // Master directly provides pointers starting at `offset * genes_per_ind`
     MPI_Scatter(mpi_rank == 0 ? genes.data() + offset * genes_per_ind : nullptr,
                 local_count * genes_per_ind, MPI_CHAR,
                 local_genes.data(), local_count * genes_per_ind, MPI_CHAR,
@@ -113,16 +98,12 @@ void evaluate_population(int offset,
     if (mpi_rank == 0)
         mpi_time += (MPI_Wtime() - t0);
 #else
-    // Non-MPI fallback reads directly from the NSGA object and calculates on the main pointer.
     if (mpi_rank == 0)
     {
         auto start_eval = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < count; ++i)
         {
-            // Lamarckian Repair (Canonicalize sequentially)
             cost_calc.canonicalize(genes.data() + (offset + i) * genes_per_ind, n_var);
-
-            // Objective extraction
             cost_sse[(offset + i) * 2] = cost_calc.calculate(genes.data() + (offset + i) * genes_per_ind, n_var);
             cost_sse[(offset + i) * 2 + 1] = sse_calc.calculate(genes.data() + (offset + i) * genes_per_ind);
         }
@@ -135,9 +116,7 @@ void evaluate_population(int offset,
     double start_eval = MPI_Wtime();
     for (int i = 0; i < local_count; ++i)
     {
-        // Lamarckian Repair
         cost_calc.canonicalize(local_genes.data() + i * genes_per_ind, n_var);
-
         double c = cost_calc.calculate(local_genes.data() + i * genes_per_ind, n_var);
         double s = sse_calc.calculate(local_genes.data() + i * genes_per_ind);
 
@@ -150,13 +129,11 @@ void evaluate_population(int offset,
     if (mpi_rank == 0)
         t2 = MPI_Wtime();
 
-    // Synchronize repaired sequence masks back to the NSGA master
     MPI_Gather(local_genes.data(), local_count * genes_per_ind, MPI_CHAR,
                mpi_rank == 0 ? genes.data() + offset * genes_per_ind : nullptr,
                local_count * genes_per_ind, MPI_CHAR,
                0, MPI_COMM_WORLD);
 
-    // Interleaved pairs format gathers directly onto contiguous master array memory
     MPI_Gather(local_results.data(), local_count * 2, MPI_DOUBLE,
                mpi_rank == 0 ? cost_sse.data() + offset * 2 : nullptr,
                local_count * 2, MPI_DOUBLE,
@@ -174,8 +151,6 @@ int main(int argc, char **argv)
     setenv("OMP_NUM_THREADS", "1", 1);
     setenv("VECLIB_MAXIMUM_THREADS", "1", 1);
 
-    // Force single-threaded BLAS at runtime — setenv alone may be too late
-    // if the library initialized its thread pool before main().
     auto set_threads = [](const char *name, int val)
     {
         auto fn = (void (*)(int))dlsym(RTLD_DEFAULT, name);
@@ -188,9 +163,9 @@ int main(int argc, char **argv)
         if (fn)
             fn(&val);
     };
-    set_threads("openblas_set_num_threads", 1); // OpenBLAS
-    set_threads("MKL_Set_Num_Threads", 1);      // Intel MKL
-    set_threads_f("blas_set_num_threads_", 1);  // Netlib (Fortran)
+    set_threads("openblas_set_num_threads", 1);
+    set_threads("MKL_Set_Num_Threads", 1);
+    set_threads_f("blas_set_num_threads_", 1);
 
     int rank = 0, size = 1;
 #ifdef USE_MPI
@@ -209,7 +184,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // --- 1. Config Parsing ---
     json config;
     {
         int open_ok = 0;
@@ -258,7 +232,6 @@ int main(int argc, char **argv)
     int pop_size = config["pop_size"];
 
 #ifdef USE_MPI
-    // Pad pop_size so it aligns perfectly with MPI scatter/gather chunks.
     if (pop_size % size != 0)
     {
         pop_size = ((pop_size + size - 1) / size) * size;
@@ -274,16 +247,13 @@ int main(int argc, char **argv)
     double time_limit = config.value("time", -1.0);
     int save_interval = config.value("save_interval", -1);
 
-    // --- 2. Load Data (AVOIDING I/O STORMS) ---
+    // --- 2. Load Data ---
     MTPData mtp;
-    std::vector<double> xtwx, xtwy;
 
     if (rank == 0)
     {
-        std::cout << "Loading MTP and binary data...\n";
+        std::cout << "Loading MTP data...\n";
         mtp = parse_mtp(config["mtp_file"]);
-        xtwx = read_binary<double>(config["xtwx_file"]);
-        xtwy = read_binary<double>(config["xtwy_file"]);
     }
 
 #ifdef USE_MPI
@@ -301,29 +271,16 @@ int main(int argc, char **argv)
         if (sz > 0)
             MPI_Bcast(vec.data(), sz, MPI_INT, 0, MPI_COMM_WORLD);
     };
-    auto bcast_double_vec = [](std::vector<double> &vec, int r)
-    {
-        int sz = vec.size();
-        MPI_Bcast(&sz, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        if (r != 0)
-            vec.resize(sz);
-        if (sz > 0)
-            MPI_Bcast(vec.data(), sz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    };
 
     bcast_int_vec(mtp.alpha_index_basic, rank);
     bcast_int_vec(mtp.alpha_index_times, rank);
     bcast_int_vec(mtp.alpha_moment_mapping, rank);
-    bcast_double_vec(xtwx, rank);
-    bcast_double_vec(xtwy, rank);
 #endif
 
     int n_var = mtp.alpha_scalar_moments;
 
     // --- 3. Initialize Evaluators and Buffers ---
-    SSECalculator sse_calc(xtwx, xtwy, config["ytwy"],
-                           config.value("regularization", 0.0),
-                           mtp.species_count, n_var, rank);
+    SSECalculator sse_calc(mtp.species_count, n_var, rank);
 
     CostCalculator cost_calc(mtp.alpha_moments_count, mtp.alpha_index_basic,
                              mtp.alpha_index_times, mtp.alpha_moment_mapping,
@@ -340,14 +297,12 @@ int main(int argc, char **argv)
         local_results.resize(local_count * 2);
     }
 
-    // Determine output directory mapping & Handle restarting
     std::string latest_pop_file = "";
     std::filesystem::path output_dir = config["out_dir"].get<std::string>();
 
     if (rank == 0)
     {
         std::string base_out_dir_str = output_dir.string();
-        // Remove trailing slash if present for cleaner numbering appending
         if (!base_out_dir_str.empty() && base_out_dir_str.back() == '/')
         {
             base_out_dir_str.pop_back();
@@ -360,7 +315,6 @@ int main(int argc, char **argv)
             output_dir = std::filesystem::path(base_out_dir_str + "_" + std::to_string(restart_count));
         }
 
-        // Search backwards sequentially to find the most recent valid save we can load from
         for (int r = restart_count - 1; r >= 1; --r)
         {
             std::filesystem::path check_dir = (r == 1) ? std::filesystem::path(base_out_dir_str) : std::filesystem::path(base_out_dir_str + "_" + std::to_string(r));
@@ -388,12 +342,10 @@ int main(int argc, char **argv)
         std::cout << "Saving new results to: " << output_dir.string() << "\n";
     }
 
-    // Set tracking variables
     double eval_time = 0.0;
     double mpi_time = 0.0;
     double gather_time = 0.0;
 
-    // Shift start_time calculation here to cover the total process scope properly
     auto start_time = std::chrono::high_resolution_clock::now();
 
     auto elapsed_s = [&]()
@@ -410,14 +362,12 @@ int main(int argc, char **argv)
         std::cout << "Evaluating initial population..." << std::endl;
     }
 
-    // Evaluate gen 0 evaluating directly at index 0 up to pop_size bounds
     evaluate_population(0, pop_size, n_var, rank, size, cost_calc, sse_calc,
                         ga.genes, ga.cost_sse, local_genes, local_results,
                         eval_time, mpi_time, gather_time);
 
     if (rank == 0)
     {
-        // Survival run isolated to rank population count itself to initialize parameters natively
         ga.survival(pop_size);
     }
 
@@ -428,11 +378,9 @@ int main(int argc, char **argv)
     {
         if (rank == 0)
         {
-            // Populate next pop_size sequence right inline natively over bounds
             ga.generate_offspring();
         }
 
-        // Evaluate offspring generated at index `pop_size` up to count `pop_size` lengths
         evaluate_population(pop_size, pop_size, n_var, rank, size, cost_calc, sse_calc,
                             ga.genes, ga.cost_sse, local_genes, local_results,
                             eval_time, mpi_time, gather_time);
@@ -477,7 +425,6 @@ int main(int argc, char **argv)
             break;
     }
 
-    // Only gather the evaluation times at the end
     std::vector<double> evals(size, 0.0);
 #ifdef USE_MPI
     MPI_Gather(&eval_time, 1, MPI_DOUBLE, evals.data(), 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);

@@ -36,15 +36,19 @@ MTPData parse_mtp(const std::string &filepath)
     std::string line;
     while (std::getline(file, line))
     {
-        // Trim leading and trailing whitespace
-        line.erase(0, line.find_first_not_of(" \t\r\n"));
+        // Find first non-whitespace (robust against totally empty lines & deals with indentation safely)
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos)
+            continue;
+
+        line.erase(0, start);
         line.erase(line.find_last_not_of(" \t\r\n") + 1);
 
         if (line.empty() || line == "MTP")
             continue;
 
-        // Stop immediately if we hit the active learning binary segment
-        if (line.find("#MVS_v1.1") == 0)
+        // Stop immediately if we hit active learning markers or trained numerical datasets
+        if (line.find("#MVS_v1.1") == 0 || line == "radial_coeffs" || line == "moment_coeffs")
             break;
 
         size_t eq_pos = line.find('=');
